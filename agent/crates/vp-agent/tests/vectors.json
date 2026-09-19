@@ -1,0 +1,16 @@
+{
+  "commit": "4EqLoaCexbg4FojKyaQ2yu9bY4o_CTjJwyPm_a-EHSA",
+  "transcript": "oIV8VHeUW3dBeurJxXIDBTRBnZK5i3oENYQKZrFMla8",
+  "c2s": "mZL0D3Wvk6TZ2BylfEqfAJpRz-eVihtNIS2C3kLoacg",
+  "s2c": "-hi4aTEnQn11k97Ywdox-CiboKaTx_RW1DqYLF65x3w",
+  "sas": "820910",
+  "sessionId": "6Lpapd1ahl1e6JL7ta7F3A",
+  "rekey": "g1fws6N5O0wejlPXQq0WuWSVJsQx9S2yUaRTenGkXxY",
+  "pairMac": "hl3gvKc2d4vZDDzJERfOvddtceJwFkMSBhO0VcCitK0",
+  "frame": {
+    "t": "enc",
+    "e": 0,
+    "s": 0,
+    "d": "Moi1hJLOYO0GGBGChjKbl14CDV5bqiITBbktHy3Ifr6WcQ"
+  }
+}

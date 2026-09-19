@@ -1,0 +1,16 @@
+{
+  "name": "@vision-pro/protocol",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types --no-warnings test/run.ts",
+    "test:e2e:usb": "node --experimental-strip-types --no-warnings test/e2e-usb.ts"
+  }
+}

@@ -1,0 +1,53 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Vision-Pro",
+  "version": "0.1.0",
+  "identifier": "com.vision-pro.desktop",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://127.0.0.1:5174",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; connect-src 'self' ipc: http://ipc.localhost"
+    },
+    "windows": [{
+      "label": "main",
+      "title": "Vision-Pro",
+      "width": 1120,
+      "height": 760,
+      "minWidth": 860,
+      "minHeight": 620,
+      "center": true,
+      "decorations": true,
+      "transparent": false,
+      "backgroundColor": "#0a0a0b"
+    }]
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "shortDescription": "Turn an iPad into an advanced remote interface for Windows.",
+    "category": "Productivity",
+    "copyright": "Copyright © 2026 Vision-Pro",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "windows": {
+      "nsis": {
+        "headerImage": "installer/header.bmp",
+        "sidebarImage": "installer/sidebar.bmp",
+        "installerIcon": "icons/icon.ico",
+        "languages": ["English"],
+        "displayLanguageSelector": false,
+        "compression": "lzma"
+      }
+    }
+  }
+}

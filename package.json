@@ -1,0 +1,26 @@
+{
+  "name": "vision-pro",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Vision-Pro — turn an iPad into an advanced remote interface for a Windows PC.",
+  "workspaces": [
+    "packages/*",
+    "apps/*",
+    "server"
+  ],
+  "scripts": {
+    "dev:ipad": "npm run dev -w @vision-pro/ipad",
+    "dev:desktop": "npm run dev -w @vision-pro/desktop",
+    "dev:server": "npm run dev -w @vision-pro/server",
+    "build:web": "npm run build -w @vision-pro/ipad && npm run build -w @vision-pro/desktop",
+    "build:server": "npm run build -w @vision-pro/server",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present"
+  },
+  "engines": {
+    "node": ">=22.12"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0"
+  }
+}

@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark light">
+<title>Vision-Pro · Préparer cet iPad</title>
+<style>
+  :root { --bg:#000; --fg:#f5f5f7; --muted:#8e8e93; --line:rgba(255,255,255,.12); --card:rgba(255,255,255,.06); --ok:#30d158; }
+  @media (prefers-color-scheme: light) { :root { --bg:#fbfbfd; --fg:#1d1d1f; --muted:#6e6e73; --line:rgba(0,0,0,.1); --card:#fff; } }
+  * { box-sizing:border-box; }
+  body { margin:0; min-height:100vh; background:var(--bg); color:var(--fg); font:17px/1.47 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif; -webkit-font-smoothing:antialiased; display:grid; place-items:center; padding:48px 24px; }
+  main { width:100%; max-width:560px; }
+  .brand { font-size:13px; letter-spacing:.08em; text-transform:uppercase; color:var(--muted); margin:0 0 20px; }
+  h1 { font-size:40px; line-height:1.1; letter-spacing:-.02em; margin:0 0 12px; font-weight:700; }
+  p.lead { color:var(--muted); margin:0 0 36px; }
+  ol { list-style:none; margin:0 0 32px; padding:0; border:1px solid var(--line); border-radius:20px; background:var(--card); overflow:hidden; }
+  li { display:flex; gap:16px; padding:18px 20px; border-top:1px solid var(--line); }
+  li:first-child { border-top:0; }
+  .n { flex:none; width:28px; height:28px; border-radius:50%; border:1px solid var(--line); display:grid; place-items:center; font-size:14px; font-weight:600; }
+  li b { font-weight:600; }
+  li small { display:block; color:var(--muted); font-size:14px; margin-top:2px; }
+  .actions { display:flex; flex-direction:column; gap:12px; }
+  a.btn { display:block; text-align:center; text-decoration:none; padding:15px 20px; border-radius:14px; font-weight:600; font-size:17px; }
+  a.primary { background:var(--fg); color:var(--bg); }
+  a.secondary { border:1px solid var(--line); color:var(--fg); }
+  .status { display:flex; align-items:center; gap:10px; font-size:15px; color:var(--muted); margin:0 0 20px; min-height:22px; }
+  .dot { width:8px; height:8px; border-radius:50%; background:var(--muted); }
+  .status.ok .dot { background:var(--ok); }
+  .fp { margin-top:28px; font:12px/1.6 ui-monospace, "SF Mono", Menlo, monospace; color:var(--muted); word-break:break-all; }
+</style>
+</head>
+<body>
+<main>
+  <p class="brand">Vision-Pro</p>
+  <h1>Préparer cet iPad</h1>
+  <p class="lead">Cette étape unique permet à votre iPad de vérifier la connexion sécurisée avec <b>{{NAME}}</b>. Le certificat fonctionne uniquement sur votre réseau local.</p>
+  <ol>
+    <li><span class="n">1</span><div><b>Télécharger le profil</b><small>Appuyez sur « Télécharger le profil » puis sur Autoriser.</small></div></li>
+    <li><span class="n">2</span><div><b>L’installer</b><small>Réglages → Profil téléchargé → Installer.</small></div></li>
+    <li><span class="n">3</span><div><b>Activer la confiance totale</b><small>Réglages → Général → Informations → Réglages de confiance des certificats → Autorité locale Vision-Pro.</small></div></li>
+    <li><span class="n">4</span><div><b>Revenir puis continuer</b><small>Vision-Pro s’ouvre et demande l’autorisation du PC.</small></div></li>
+  </ol>
+  <p class="status" id="status"><span class="dot"></span><span id="status-text">Vérification de la connexion sécurisée…</span></p>
+  <div class="actions">
+    <a class="btn primary" id="continue" href="{{TARGET}}" data-target="{{TARGET}}">Continuer vers Vision-Pro</a>
+    <a class="btn secondary" href="/vision-pro.mobileconfig">Télécharger le profil</a>
+  </div>
+  <p class="fp">Authority SHA-256 · {{FINGERPRINT}}</p>
+</main>
+<script src="/setup.js"></script>
+</body>
+</html>

@@ -1,0 +1,23 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "ipad-lan",
+      "runtimeExecutable": "cmd",
+      "runtimeArgs": ["/c", "set VP_AGENT=http://127.0.0.1:47802&& node_modules\\.bin\\vite.cmd apps/ipad --host 127.0.0.1 --port 5173 --strictPort"],
+      "port": 5173
+    },
+    {
+      "name": "ipad-away",
+      "runtimeExecutable": "cmd",
+      "runtimeArgs": ["/c", "set VP_AGENT=http://127.0.0.1:9&& node_modules\\.bin\\vite.cmd apps/ipad --host 127.0.0.1 --port 5173 --strictPort"],
+      "port": 5173
+    },
+    {
+      "name": "desktop-ui",
+      "runtimeExecutable": "cmd",
+      "runtimeArgs": ["/c", "node_modules\\.bin\\vite.cmd apps/desktop --host 127.0.0.1 --port 5174 --strictPort"],
+      "port": 5174
+    }
+  ]
+}

@@ -1,0 +1,19 @@
+[workspace]
+resolver = "2"
+members = ["crates/vp-agent", "crates/vp-relay"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Proprietary"
+authors = ["Vision-Pro"]
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 4
+strip = "symbols"
+panic = "unwind"
+
+[profile.dev.package."*"]
+opt-level = 2
