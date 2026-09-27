@@ -1,4 +1,4 @@
-//! Windows media engine (capture → encode → WebRTC). Filled in by the platform pipeline.
+//! Media engine used when streaming is unavailable. The real macOS engine lives in `platform::engine`.
 
 use super::{MediaContext, MediaEngine, MediaRequest, MediaStarted};
 use crate::protocol::AgentCaps;

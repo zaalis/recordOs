@@ -1,19 +1,19 @@
 # Vision-Pro — Design System
 
-This file is the visual source of truth for the iPad PWA and Windows application. Page-specific files in `pages/` may refine layout, but must not override accessibility, naming, or semantic-color rules.
+This file is the visual source of truth for the iPad PWA and the macOS application. Page-specific files in `pages/` may refine layout, but must not override accessibility, naming, or semantic-color rules.
 
 ## Product principles
 
 1. The remote content is primary. Chrome recedes and can disappear completely.
 2. Every common action feels immediate; security state stays explicit and calm.
 3. Advanced controls use progressive disclosure. Networking and codec jargon never blocks automatic mode.
-4. iPad and Windows share materials, typography, spacing, iconography, and language without pretending to be an Apple system app.
+4. iPad and Mac share materials, typography, spacing, iconography, and language without pretending to be an Apple system app.
 
 ## Visual direction
 
 - Monochrome, minimal, professional and content-first.
 - Deep black canvas, neutral white/gray surfaces, controlled transparency and light blur.
-- System typography only: SF Pro on Apple platforms, Segoe UI Variable on Windows, system sans-serif fallback elsewhere.
+- System typography only: SF Pro (SF Mono for codes), system sans-serif fallback.
 - No logo exists yet. Render the development name exactly as `Vision-Pro`; do not invent a brand mark.
 - Use the custom 24 px line SVG icon set. Never use emoji as interface icons.
 - Reserve color for semantic state: green connected/success, red destructive/error, orange warning, blue actionable information.
@@ -50,7 +50,7 @@ The implemented source of truth is `packages/design/src/styles.css` under the `-
 
 - Every icon-only control has an accessible label and visible focus state.
 - Do not rely on hover; pressed, selected, loading, denied and reconnecting states must be visible.
-- Pairing always distinguishes discovery from authorization and shows confirmation on Windows.
+- Pairing always distinguishes discovery from authorization and shows confirmation on the Mac.
 - Destructive actions are named precisely and require confirmation when they revoke identity or trust.
 - Auto-hidden controls must remain recoverable with one obvious tap.
 

@@ -15,13 +15,6 @@ pub struct MediaRequest {
     pub offer: RtcOffer,
     pub session_id: String,
     pub device_name: String,
-    /// Present when the iPad reached this PC through the relay.
-    pub relay: Option<crate::relay::RelayMediaLink>,
-    /// Only address offered as ICE candidate (the USB cable the session arrived on), so video
-    /// and input stay on the cable.
-    pub bind: Option<std::net::Ipv4Addr>,
-    /// Addresses never offered on a local-network session (cable addresses).
-    pub exclude: Vec<std::net::Ipv4Addr>,
 }
 
 #[derive(Clone)]

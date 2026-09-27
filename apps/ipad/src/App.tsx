@@ -15,9 +15,22 @@ export function App() {
   const ready = useApp((s) => s.ready);
   const phase = useSyncExternalStore(connection.subscribe, () => connection.getSnapshot().phase);
 
-  // Remember and pin every PC this iPad successfully connects to.
   useEffect(() => {
-    connection.onPaired = ({ agentId, name, fingerprint, relayUrl, usbUrls }) => {
+    const onPagehide = () => connection.suspendForPagehide();
+    const onVisible = () => { if (!document.hidden) connection.resumeVisible(); };
+    window.addEventListener('pagehide', onPagehide);
+    window.addEventListener('pageshow', onVisible);
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      window.removeEventListener('pagehide', onPagehide);
+      window.removeEventListener('pageshow', onVisible);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  }, []);
+
+  // Remember and pin every Mac this iPad successfully connects to.
+  useEffect(() => {
+    connection.onPaired = ({ agentId, name, fingerprint }) => {
       const { agent, computers } = store.get();
       const existing = computers.find((c) => c.agentId === agentId);
       void rememberComputer({
@@ -28,10 +41,6 @@ export function App() {
         port: agent?.agentId === agentId ? agent.port : (existing?.port ?? Number(location.port || 443)),
         pairedAt: existing?.pairedAt ?? Date.now(),
         lastConnectedAt: Date.now(),
-        // Every session reports the PC's current relay; an absent value means remote access is off.
-        ...(relayUrl ? { relayUrl } : {}),
-        // Cable endpoints stay valid across sessions (the tablet gives the PC the same address).
-        ...(usbUrls.length ? { usbUrls } : existing?.usbUrls ? { usbUrls: existing.usbUrls } : {}),
       });
     };
     connection.onAccessRemoved = (agentId) => {
@@ -43,7 +52,7 @@ export function App() {
     };
   }, []);
 
-  // QR code links: https://<pc>.local:47800/#/pair?a=…&fp=…&t=…
+  // QR code links: https://<mac>.local:47800/#/pair?a=…&fp=…&t=…
   useEffect(() => {
     if (!ready) return;
     const link = parsePairingFragment(location.hash);
@@ -55,8 +64,8 @@ export function App() {
     setScreen('session');
     void connection.connect(
       // A QR code is always an explicit, one-time pairing request. Do not let an
-      // old iPad record turn it into authentication after the PC removed access.
-      { agentId: link.agentId, name: link.name || 'PC', fingerprint: link.fingerprint, mode: 'pair', proof: { kind: 'qr', secret: link.token } },
+      // old iPad record turn it into authentication after the Mac removed access.
+      { agentId: link.agentId, name: link.name || 'Mac', fingerprint: link.fingerprint, mode: 'pair', proof: { kind: 'qr', secret: link.token } },
       identity,
       prefs.deviceName,
       prefs.video,

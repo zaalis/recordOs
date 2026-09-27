@@ -1,0 +1,4 @@
+# Every crate (including the Objective-C bridge compiled by vp-agent's build.rs) targets
+# macOS 13 Ventura, the minimum for the ScreenCaptureKit features Vision-Pro uses.
+[env]
+MACOSX_DEPLOYMENT_TARGET = "13.0"

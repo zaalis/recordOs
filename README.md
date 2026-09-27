@@ -1,91 +1,144 @@
-# Vision-Pro
+# Vision-Pro pour macOS
 
-Vision-Pro transforms an iPad into a secure, low-latency control surface for a Windows PC. The local path is direct: the Windows agent handles authenticated signaling, screen capture, encoding, WebRTC media, and validated input without routing the video through an account server.
+Vision-Pro transforme un iPad en surface de contrôle sécurisée et à faible latence pour un **Mac**. Le chemin local est direct : l'agent macOS gère la signalisation authentifiée, la capture d'écran (ScreenCaptureKit), l'encodage matériel (VideoToolbox), le flux WebRTC et l'injection des commandes (souris, clavier, Apple Pencil avec pression et inclinaison) sans jamais faire transiter la vidéo par un serveur.
 
-The product currently contains a functional iPad PWA, a native Windows/Tauri control application backed by Rust, a shared binary and signaling protocol, and an optional loopback account service.
+Ce dossier est la version **100 % macOS** du projet : aucun code, dépendance ni cible Windows.
 
-## Project map
+## Contenu du projet
 
-| Path | Responsibility |
+| Chemin | Rôle |
 | --- | --- |
-| `apps/ipad` | Safari/iPadOS PWA, pairing, WebRTC receiver, touch/trackpad/Pencil input, creative profiles, quality controls, statistics |
-| `apps/desktop` | Native Tauri interface for service, devices, capture, streaming, input, security, network and diagnostics |
-| `agent/crates/vp-agent` | Rust agent, mDNS discovery, authenticated WebSocket signaling, pairing, session lifecycle, WebRTC, Windows capture/encode/input, USB Direct cable detection, Remote Access relay client |
-| `agent/crates/vp-relay` | Internet relay: challenge-signed agent registry, end-to-end encrypted signaling splice, TURN restricted to registered PCs |
-| `packages/protocol` | Shared TypeScript wire protocol, cryptography, strict validation, input encoding and application profiles |
-| `packages/design` | Shared React components and icons |
-| `server` | Optional private account service and static PWA host; never transports the local video stream |
-| `design-system/vision-pro` | Canonical visual and interaction rules |
-| `docs` | Architecture, security and operational notes |
+| `apps/ipad` | PWA iPadOS/Safari : association, réception WebRTC, toucher, trackpad, Apple Pencil, profils créatifs, qualité, statistiques |
+| `apps/desktop` | Application Mac native (Tauri + WKWebView) : service, appareils, écrans, diffusion, commandes, sécurité, réseau, autorisations macOS |
+| `agent/crates/vp-agent` | Agent Rust : mDNS/Bonjour, signalisation WebSocket authentifiée, association, sessions, WebRTC |
+| `agent/crates/vp-agent/native` | Pont Objective-C vers ScreenCaptureKit, VideoToolbox, Quartz Event Services, Keychain, IOKit |
+| `agent/crates/vp-agent/src/platform` | Couche macOS en Rust (écrans, capture, encodeur, injection, clavier, Keychain, autorisations) |
+| `packages/protocol` | Protocole TypeScript partagé (binaire + signalisation), cryptographie, validation, profils d'apps Mac |
+| `packages/design` | Composants React et icônes partagés |
+| `server` | Service de comptes optionnel ; ne transporte jamais la vidéo locale |
+| `docs` | Architecture, sécurité |
 
-## Requirements
+## Prérequis
 
-- Windows 10 or 11 for the native agent
-- Node.js 22.12 or newer
-- Rust stable with the MSVC target
-- Microsoft C++ Build Tools and WebView2 for native Windows builds
-- iPadOS Safari for the target client experience
+- **macOS 13 Ventura ou plus récent** (Apple silicon M1–M4 ou Mac Intel)
+- **Outils de ligne de commande Xcode** : `xcode-select --install`
+- **Rust stable** (via [rustup](https://rustup.rs)) — les cibles `aarch64-apple-darwin` et `x86_64-apple-darwin` sont déclarées dans `rust-toolchain.toml`
+- **Node.js 22.12 ou plus récent**
+- iPad avec **Safari** (iPadOS 17 ou plus récent recommandé)
 
-## Development
+## Compiler sur le Mac
 
-```powershell
-npm install
+Copiez le dossier `vision-pro-macos` sur le Mac, ouvrez le Terminal dans ce dossier puis :
+
+```bash
+bash scripts/setup-macos.sh
+```
+
+```bash
+npm run build:mac
+```
+
+Résultat :
+
+- `apps/desktop/src-tauri/target/release/bundle/macos/Vision-Pro.app`
+- `apps/desktop/src-tauri/target/release/bundle/dmg/Vision-Pro_0.1.0_*.dmg`
+
+Pour un binaire **universel** (Apple silicon + Intel) :
+
+```bash
+npm run build:mac:universal
+```
+
+Compilation complète avec tous les tests (TypeScript, Rust) avant l'empaquetage :
+
+```bash
+bash scripts/build-macos.sh
+```
+
+> L'agent embarque l'app iPad compilée (`apps/ipad/dist`). Les commandes `build:mac` le font automatiquement ; si vous lancez `cargo` directement, exécutez d'abord `npm run build:web`.
+
+## Premier lancement : autorisations macOS
+
+macOS protège l'écran et les entrées. Au premier lancement, ouvrez **Vision-Pro → Sécurité → Autorisations macOS** et autorisez :
+
+1. **Enregistrement de l'écran** (Réglages Système → Confidentialité et sécurité → Enregistrement de l'écran et de l'audio système) — nécessaire pour diffuser l'écran.
+2. **Accessibilité** (Réglages Système → Confidentialité et sécurité → Accessibilité) — nécessaire pour que l'iPad contrôle le pointeur, le clavier et l'Apple Pencil.
+3. **Réseau local** — macOS le demande automatiquement lors de la première connexion d'un iPad.
+
+Quittez puis rouvrez Vision-Pro si macOS le demande après avoir coché une autorisation.
+
+L'application n'est pas signée avec un certificat Developer ID : elle est signée « ad hoc » à la compilation. Si vous la copiez sur un autre Mac, ouvrez-la avec **clic droit → Ouvrir** la première fois. Après chaque recompilation, macOS peut demander de réactiver les autorisations (l'empreinte de l'app change). Pour distribuer l'app, signez-la et notarisez-la (variables `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID` reconnues par Tauri).
+
+## Développement
+
+Application de bureau avec rechargement à chaud :
+
+```bash
+npm run dev:mac
+```
+
+Agent sans interface (console) — les demandes d'association s'affichent dans le terminal, tapez `y` ou `n` :
+
+```bash
+npm run agent -- --connect
+```
+
+Le terminal qui lance l'agent doit lui aussi avoir les autorisations Enregistrement de l'écran et Accessibilité.
+
+Interface iPad seule :
+
+```bash
 npm run dev:ipad
-npm run dev:desktop
 ```
 
-Run the headless agent for local development:
+## Vérifications
 
-```powershell
-cargo run --manifest-path agent/Cargo.toml --bin vp-agentd
-```
-
-The secure default binds the agent on the local network at HTTPS port `47800`, advertises `_vision-pro._tcp.local`, and still requires explicit pairing. The special loopback development endpoint is off by default and must never be enabled as a production exposure mechanism.
-
-## Validation and builds
-
-```powershell
+```bash
 npm run typecheck
+```
+
+```bash
 npm test
-npm run build:web
-cargo test --manifest-path agent/Cargo.toml --workspace
-npm run test:e2e:usb -w @vision-pro/protocol
-npm run tauri --workspace @vision-pro/desktop -- build
 ```
 
-## USB Direct
-
-Plug the iPad (or an Android tablet) into the PC with a cable: Vision-Pro detects it instantly and the whole session — signaling, video, cursor and input — goes through the cable, with no Wi-Fi or router. A Wi-Fi session in progress moves onto the cable when it is plugged in, and falls back to Wi-Fi within about a second when it is unplugged, without a black frame.
-
-The cable carries IP from the tablet's USB network function: Personal Hotspot on an iPad (Wi-Fi + Cellular models, with Apple's "Apple Devices" drivers on Windows) or USB tethering on Android. The PC app's **Network → USB cable** section shows the detected tablet, what to enable on it, and a one-click (UAC) fix when Windows blocks the cable network. See [USB Direct](docs/USB.md).
-
-## Remote Access relay
-
-To use the iPad from another network, run `vp-relay` on a public host with a TLS certificate, then enter its address in **Network → Remote Access** on the PC. Pair the iPad once on the local network; it then shows the PC as **Via Internet** when away. Signaling stays end-to-end encrypted and pinned to the PC key, and media stays DTLS-SRTP. See [relay](docs/RELAY.md) for the protocol, threat model and deployment.
-
-```powershell
-cargo run --manifest-path agent/Cargo.toml -p vp-relay -- --host relay.example.com --cert fullchain.pem --key privkey.pem --token <secret>
+```bash
+npm run test:agent
 ```
 
-The Windows installer is emitted under `apps/desktop/src-tauri/target/release/bundle/nsis`. The standalone binary is under `apps/desktop/src-tauri/target/release`.
+Le test du Keychain touche au trousseau de session ; il est ignoré par défaut :
 
-## Optional private account service
-
-The account service binds to `127.0.0.1` and is intended to sit behind a TLS reverse proxy on a private deployment. It is not required for direct LAN control.
-
-```powershell
-$env:VP_ACCOUNT_PORT = '3000'
-$env:VP_ACCOUNT_DATA = 'D:\Vision-Pro\users.json'
-$env:VP_WEB_ROOT = "$PWD\apps\ipad\dist"
-$env:VP_ALLOW_REGISTRATION = '0'
-npm run start --workspace @vision-pro/server
+```bash
+cargo test --manifest-path agent/Cargo.toml -- --ignored
 ```
 
-Registration is disabled unless `VP_ALLOW_REGISTRATION=1`. `VP_INSECURE_DEV=1` removes the Secure cookie requirement only for an explicit loopback HTTP development test; never use it in deployment.
+## Ce qui est spécifique à macOS
 
-## Current scope boundaries
+| Fonction | Implémentation macOS |
+| --- | --- |
+| Capture d'écran | ScreenCaptureKit : image en mémoire GPU (IOSurface), mise à l'échelle et conversion NV12 BT.709 par le WindowServer, uniquement les images modifiées |
+| Encodage | VideoToolbox matériel (moteur multimédia Apple silicon ou Quick Sync Intel), H.264 High / HEVC Main, contrôle de débit faible latence, IDR à la demande ; repli logiciel OpenH264 |
+| Pointeur | Position et forme (`NSCursor`) envoyées à part : l'iPad dessine le curseur sans la latence vidéo |
+| Souris / trackpad | Quartz Event Services : vrais glissers, double et triple clics, deltas relatifs, défilement au pixel |
+| Pincement | Geste natif « magnify » de macOS (comme un trackpad Mac) ; molette pour Blender/Maya/ZBrush/Houdini |
+| Apple Pencil | Stylet de tablette macOS : pression, inclinaison, rotation, gomme, proximité |
+| Clavier | Touches Mac (⌘ ⌥ ⌃ ⇧), touches fn, pavé numérique, touches multimédia ; gestes à 3 doigts → Mission Control, Spaces, sélecteur d'apps |
+| Profils créatifs | Détectés par identifiant de bundle : Blender, Maya, ZBrush, Houdini, Photoshop — raccourcis ⌘ |
+| Secrets | Identité et autorité locale chiffrées (AES-256-GCM) avec une clé stockée dans le trousseau de session |
+| Données | `~/Library/Application Support/Vision-Pro` (droits 0700/0600) |
+| Veille | Assertion IOKit pendant une session |
+| Démarrage | LaunchAgent « Ouvrir à l'ouverture de session » ; fermer la fenêtre garde le service actif, ⌘Q quitte |
+| Arrêt d'urgence | Raccourci global ⌘⌥⇧⌫ |
 
-LAN discovery, approval, secure pairing, direct WebRTC streaming, USB cable streaming and remote input are implemented. Remote Access through a self-operated `vp-relay` is implemented and stays disabled until the PC is switched to Remote Access with a relay address. The optional account service currently supports hardened password sessions; WebAuthn/passkeys, 2FA and preference synchronization remain capability-gated and are not advertised as active features.
+## Service de comptes optionnel
 
-See [architecture](docs/ARCHITECTURE.md) and [security model](docs/SECURITY.md) for the trust boundaries and limitations.
+Le service de comptes écoute sur `127.0.0.1` et doit être placé derrière un proxy TLS. Il n'est pas nécessaire pour le contrôle direct en réseau local.
 
+```bash
+VP_ACCOUNT_PORT=3000 VP_ACCOUNT_DATA="$HOME/Vision-Pro/users.json" VP_WEB_ROOT="$PWD/apps/ipad/dist" VP_ALLOW_REGISTRATION=0 npm run start --workspace @vision-pro/server
+```
+
+## Limites actuelles
+
+La découverte locale, l'association sécurisée, la diffusion WebRTC directe et le contrôle à distance sont implémentés. L'accès à distance via relais est prévu dans l'architecture mais volontairement inactif sans relais authentifié. macOS n'a pas d'encodeur AV1 matériel : l'agent négocie H.264 ou HEVC.
+
+Voir [architecture](docs/ARCHITECTURE.md) et [modèle de sécurité](docs/SECURITY.md).

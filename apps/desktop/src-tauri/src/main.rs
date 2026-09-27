@@ -1,4 +1,4 @@
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+//! Vision-Pro for macOS: the menu-bar-less desktop app that hosts the agent and its settings UI.
 
 use std::sync::Arc;
 use tauri::{Emitter, Manager};
@@ -6,6 +6,7 @@ use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 use vp_agent::agent::Agent;
 use vp_agent::config::Settings;
+use vp_agent::platform::permissions;
 use vp_agent::store::Permission;
 
 type SharedAgent = Arc<Agent>;
@@ -33,10 +34,9 @@ fn save_settings(
     let settings: Settings = serde_json::from_value(settings).map_err(|error| error.to_string())?;
     let previous = agent.settings();
 
-    // Autostart is a separate Windows resource. Calling `disable` every time a
-    // completely unrelated setting changes fails with ERROR_FILE_NOT_FOUND when
-    // Windows has no existing startup entry, and used to prevent every setting
-    // from being persisted. Only touch it when the user actually toggles it.
+    // "Open at login" is a separate LaunchAgent (~/Library/LaunchAgents). Only
+    // touch it when the user actually toggles it, so an unrelated setting can
+    // never fail because the login item is missing or managed elsewhere.
     if previous.advanced.launch_at_login != settings.advanced.launch_at_login {
         let autolaunch = app.autolaunch();
         let enabled = autolaunch.is_enabled().map_err(|error| error.to_string())?;
@@ -126,14 +126,27 @@ fn unlock_sources(agent: tauri::State<'_, SharedAgent>) {
     agent.unlock_sources();
 }
 
-/// Asks Windows (UAC) to treat a tablet's cable network as private and allow Vision-Pro on it.
+/// Screen Recording and Accessibility state (macOS privacy permissions).
 #[tauri::command]
-async fn allow_usb_link(agent: tauri::State<'_, SharedAgent>, id: String) -> Result<(), String> {
-    let agent = agent.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || agent.allow_usb_link(&id))
-        .await
-        .map_err(|error| error.to_string())?
-        .map_err(|error| error.to_string())
+fn get_permissions() -> Result<serde_json::Value, String> {
+    json(permissions::status())
+}
+
+/// Shows the system prompt when possible, otherwise opens the matching System Settings pane.
+#[tauri::command]
+fn request_permission(kind: String) -> Result<(), String> {
+    let permission =
+        permissions::Permission::parse(&kind).ok_or_else(|| "Unknown permission".to_string())?;
+    permissions::request(permission);
+    Ok(())
+}
+
+#[tauri::command]
+fn open_permission_settings(kind: String) -> Result<(), String> {
+    let permission =
+        permissions::Permission::parse(&kind).ok_or_else(|| "Unknown permission".to_string())?;
+    permissions::open_settings(permission);
+    Ok(())
 }
 
 fn main() {
@@ -176,7 +189,9 @@ fn main() {
             });
             let emergency_agent = agent.clone();
             let emergency_shortcut = agent.settings().security.emergency_shortcut;
-            app.global_shortcut().on_shortcut(
+            // ⌘⌥⇧⌫ by default. A shortcut already taken by another app must not
+            // prevent Vision-Pro from starting: the Disconnect button still works.
+            if let Err(error) = app.global_shortcut().on_shortcut(
                 emergency_shortcut.as_str(),
                 move |handle, _shortcut, event| {
                     if event.state == ShortcutState::Pressed {
@@ -184,9 +199,21 @@ fn main() {
                         let _ = handle.emit("emergency-disconnect", disconnected);
                     }
                 },
-            )?;
+            ) {
+                eprintln!("Vision-Pro emergency shortcut {emergency_shortcut} unavailable: {error}");
+            }
             app.manage(agent);
             Ok(())
+        })
+        // Like other Mac utilities, closing the window keeps the service available;
+        // the Dock icon reopens it and ⌘Q quits.
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "main" {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![
             get_status,
@@ -201,14 +228,22 @@ fn main() {
             device_action,
             emergency_disconnect,
             unlock_sources,
-            allow_usb_link,
+            get_permissions,
+            request_permission,
+            open_permission_settings,
         ])
         .build(tauri::generate_context!())
         .expect("failed to build Vision-Pro");
 
-    app.run(|handle, event| {
-        if matches!(event, tauri::RunEvent::Exit) {
-            handle.state::<SharedAgent>().shutdown();
+    app.run(|handle, event| match event {
+        tauri::RunEvent::Reopen { .. } => {
+            if let Some(window) = handle.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
         }
+        tauri::RunEvent::Exit => handle.state::<SharedAgent>().shutdown(),
+        _ => {}
     });
 }

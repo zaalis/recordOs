@@ -15,7 +15,7 @@ export function Insecure() {
             Secure connection required
           </h1>
           <p className="hero-subtitle" style={{ marginTop: 0 }}>
-            Vision-Pro only runs over an encrypted connection, so your PC and this iPad can verify each other. Open the secure address shown on your PC.
+            Vision-Pro only runs over an encrypted connection, so your Mac and this iPad can verify each other. Open the secure address shown on your Mac.
           </p>
           <div>
             <Button variant="primary" size="lg" onClick={() => (location.href = secureUrl)}>

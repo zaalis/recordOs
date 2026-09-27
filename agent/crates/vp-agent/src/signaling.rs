@@ -12,7 +12,7 @@ use crate::events::{AgentEvent, PairingRequestInfo};
 use crate::media::{MediaContext, MediaHandle, MediaRequest};
 use crate::protocol::{ClientInit, ClientProve, DeviceRotate, PairRequest, RtcOffer};
 use crate::security::Severity;
-use crate::session::{EndReason, Link, SessionCommand, SessionInfo};
+use crate::session::{EndReason, SessionCommand, SessionInfo};
 use crate::store::{DeviceStatus, Permission};
 use crate::util::{b64u, from_b64u, now_ms, random_bytes, random_token, sanitize_name};
 use p256::ecdh::EphemeralSecret;
@@ -27,14 +27,6 @@ use tokio::time::{timeout, Instant};
 
 const STEP_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_FRAME: usize = 96 * 1024;
-
-/// How the iPad reached this PC. Relayed sessions come from the Internet: pairing always needs
-/// a code or QR proof, and media goes through the relay's TURN service.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Route {
-    Direct,
-    Relay,
-}
 
 /// Minimal transport abstraction so the same session logic runs over the local WebSocket or a relay.
 pub trait SignalTransport: Send {
@@ -61,17 +53,6 @@ struct Ctx<'a, T: SignalTransport> {
     core: &'a Arc<Core>,
     transport: &'a mut T,
     ip: IpAddr,
-}
-
-/// Physical path of a new session: a connection arriving on a cable address is a USB session.
-fn link_of(core: &Core, route: Route, local: Option<IpAddr>) -> Link {
-    match route {
-        Route::Relay => Link::Relay,
-        Route::Direct if local.is_some_and(|ip| core.usb.read().link_for(ip).is_some()) => {
-            Link::Usb
-        }
-        Route::Direct => Link::Lan,
-    }
 }
 
 impl<T: SignalTransport> Ctx<'_, T> {
@@ -178,14 +159,7 @@ async fn recv_secure<T: SignalTransport>(
     }
 }
 
-/// `local` is the address of this PC the connection arrived on (None for relayed sessions).
-pub async fn run<T: SignalTransport>(
-    core: Arc<Core>,
-    mut transport: T,
-    ip: IpAddr,
-    route: Route,
-    local: Option<IpAddr>,
-) {
+pub async fn run<T: SignalTransport>(core: Arc<Core>, mut transport: T, ip: IpAddr) {
     let Ok(_permit) = core.handshake_slots.clone().try_acquire_owned() else {
         let _ = transport
             .send_text(
@@ -195,7 +169,7 @@ pub async fn run<T: SignalTransport>(
         transport.close().await;
         return;
     };
-    let result = session(&core, &mut transport, ip, route, local, _permit).await;
+    let result = session(&core, &mut transport, ip, _permit).await;
     if let Err(Abort::Client(code)) = &result {
         tracing::debug!(%ip, code, "signaling ended");
     }
@@ -206,8 +180,6 @@ async fn session<T: SignalTransport>(
     core: &Arc<Core>,
     transport: &mut T,
     ip: IpAddr,
-    route: Route,
-    local: Option<IpAddr>,
     permit: tokio::sync::OwnedSemaphorePermit,
 ) -> Result<(), Abort> {
     let mut ctx = Ctx {
@@ -232,7 +204,6 @@ async fn session<T: SignalTransport>(
     let server_nonce = random_bytes::<32>();
     let commit = crypto::commit(&server_eph_raw, &server_nonce);
     let window_open = core.pairing.window().is_some();
-    let nearby_pairing = settings.network.allow_nearby_pairing && route == Route::Direct;
     ctx.send_plain(json!({
         "t": "hello",
         "v": crate::protocol::PROTOCOL_VERSION,
@@ -240,7 +211,7 @@ async fn session<T: SignalTransport>(
         "agentName": settings.computer_name,
         "agentPub": b64u(identity.public_raw()),
         "commit": b64u(&commit),
-        "pairing": { "nearby": nearby_pairing, "code": window_open, "qr": window_open },
+        "pairing": { "nearby": settings.network.allow_nearby_pairing, "code": window_open, "qr": window_open },
     }))
     .await?;
 
@@ -393,7 +364,7 @@ async fn session<T: SignalTransport>(
                         return Err(ctx.fail("denied", None).await);
                     }
                 },
-                None if nearby_pairing => "nearby",
+                None if settings.network.allow_nearby_pairing => "nearby",
                 None => return Err(ctx.fail("pairing_disabled", None).await),
             };
             needs_approval = Some(method);
@@ -441,7 +412,7 @@ async fn session<T: SignalTransport>(
         )
         .await?;
 
-        // Wait for the PC user, the timeout, or the iPad giving up — whichever comes first.
+        // Wait for the Mac user, the timeout, or the iPad giving up — whichever comes first.
         let outcome = tokio::select! {
             result = decision => if result.unwrap_or(false) { "approved" } else { "denied" },
             _ = tokio::time::sleep(Duration::from_secs(timeout_secs)) => "expired",
@@ -530,27 +501,7 @@ async fn session<T: SignalTransport>(
 
     core.guard.record_success(ip);
     drop(permit);
-    run_session(
-        core,
-        ctx.transport,
-        channel,
-        ip,
-        route,
-        local,
-        &init,
-        &keys.session_id,
-    )
-    .await
-}
-
-/// Stopping media joins the capture thread; keep the other async workers running meanwhile.
-fn stop_media(handle: &mut Box<dyn MediaHandle>) {
-    match tokio::runtime::Handle::try_current().map(|h| h.runtime_flavor()) {
-        Ok(tokio::runtime::RuntimeFlavor::MultiThread) => {
-            tokio::task::block_in_place(|| handle.stop())
-        }
-        _ => handle.stop(),
-    }
+    run_session(core, ctx.transport, channel, ip, &init, &keys.session_id).await
 }
 
 /// Resolves when the transport closes (used while waiting for an approval).
@@ -569,44 +520,16 @@ async fn wait_for_close<T: SignalTransport>(transport: &mut T, channel: &mut Sec
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn run_session<T: SignalTransport>(
     core: &Arc<Core>,
     transport: &mut T,
     mut channel: SecureChannel,
     ip: IpAddr,
-    route: Route,
-    local: Option<IpAddr>,
     init: &ClientInit,
     session_id: &str,
 ) -> Result<(), Abort> {
     let identity = core.identity.read().clone();
     let settings = core.settings.read().clone();
-    let link = link_of(core, route, local);
-    let local_v4 = local.and_then(|ip| match ip {
-        IpAddr::V4(v4) => Some(v4),
-        IpAddr::V6(v6) => v6.to_ipv4_mapped(),
-    });
-    // The TURN credential outlives the whole session so allocations can be refreshed until it ends.
-    let relay_media = match route {
-        Route::Direct => None,
-        Route::Relay => {
-            let ttl = settings.security.session_max_minutes as u64 * 60 + 600;
-            match core.relay.issue(ttl).await {
-                Ok(credential) => Some(credential),
-                Err(error) => {
-                    core.audit.record(
-                        Severity::Warning,
-                        "relay.media-unavailable",
-                        format!("A relayed session could not start: {error}"),
-                    );
-                    let end = json!({ "t": "session.end", "reason": "error" });
-                    let _ = send_secure(transport, &mut channel, end).await;
-                    return Err(Abort::Client("relay"));
-                }
-            }
-        }
-    };
     let record = {
         let mut devices = core.devices.write();
         devices.touch(&init.device_id, &ip.to_string());
@@ -632,9 +555,6 @@ async fn run_session<T: SignalTransport>(
             stats: None,
             rtt_ms: None,
             active_app: None,
-            via_relay: route == Route::Relay,
-            link,
-            local_ip: local_v4.map(|ip| ip.to_string()),
         },
         cmd_tx,
     );
@@ -644,11 +564,7 @@ async fn run_session<T: SignalTransport>(
             .record(
                 Severity::Notice,
                 "session.started",
-                if link == Link::Usb {
-                    format!("{} connected by USB cable.", record.name)
-                } else {
-                    format!("{} connected.", record.name)
-                },
+                format!("{} connected.", record.name),
             )
             .ip(ip)
             .device(&record.id, &record.name);
@@ -659,38 +575,24 @@ async fn run_session<T: SignalTransport>(
     let expires_at = now_ms() + max_duration.as_millis() as u64;
 
     let result = async {
-        let mut ready = json!({
-            "t": "session.ready",
-            "sessionId": session_id,
-            "device": { "id": record.id, "name": record.name, "permission": record.permission },
-            "agent": {
-                "id": identity.agent_id,
-                "name": settings.computer_name,
-                "version": crate::VERSION,
-                "hostname": core.hostname,
-            },
-            "caps": core.media.capabilities(),
-            "expiresAt": expires_at,
-            "link": link,
-        });
-        // A cable path the iPad can move to. It probes it first: only the tablet at the other end
-        // of the cable can reach these addresses.
-        let usb_urls = core.usb.read().urls();
-        if route == Route::Direct && !usb_urls.is_empty() {
-            ready["usb"] = json!({ "urls": usb_urls });
-        }
-        // Paired iPads learn the relay here, inside the authenticated channel, so they can come back
-        // from another network later.
-        if let Some(url) = core.relay.public_url() {
-            ready["relay"] = json!({ "url": url });
-        }
-        if let Some(credential) = &relay_media {
-            ready["ice"] = json!({
-                "iceServers": [{ "urls": credential.urls, "username": credential.username, "credential": credential.credential }],
-                "iceTransportPolicy": "relay",
-            });
-        }
-        send_secure(transport, &mut channel, ready).await?;
+        send_secure(
+            transport,
+            &mut channel,
+            json!({
+                "t": "session.ready",
+                "sessionId": session_id,
+                "device": { "id": record.id, "name": record.name, "permission": record.permission },
+                "agent": {
+                    "id": identity.agent_id,
+                    "name": settings.computer_name,
+                    "version": crate::VERSION,
+                    "hostname": core.hostname,
+                },
+                "caps": core.media.capabilities(),
+                "expiresAt": expires_at,
+            }),
+        )
+        .await?;
 
         let mut media: Option<Box<dyn MediaHandle>> = None;
         let deadline = Instant::now() + max_duration;
@@ -721,7 +623,7 @@ async fn run_session<T: SignalTransport>(
                                 }
                             };
                             if let Some(mut old) = media.take() {
-                                stop_media(&mut old);
+                                old.stop();
                             }
                             let context = MediaContext {
                                 control_allowed: control_allowed.clone(),
@@ -732,14 +634,7 @@ async fn run_session<T: SignalTransport>(
                                     Arc::new(move || { let _ = events.send(AgentEvent::SessionsChanged); })
                                 },
                             };
-                            let request = MediaRequest {
-                                offer,
-                                session_id: session_id.to_string(),
-                                device_name: record.name.clone(),
-                                relay: relay_media.as_ref().map(|c| core.relay.open_route(c.peer)),
-                                bind: if link == Link::Usb { local_v4 } else { None },
-                                exclude: if link == Link::Lan { core.usb.read().local_ips() } else { vec![] },
-                            };
+                            let request = MediaRequest { offer, session_id: session_id.to_string(), device_name: record.name.clone() };
                             let engine = core.media.clone();
                             let started = tokio::task::spawn_blocking(move || engine.start(request, context)).await;
                             match started {
@@ -756,7 +651,7 @@ async fn run_session<T: SignalTransport>(
                                 Ok(Err(error)) => {
                                     tracing::error!(%error, "media start failed");
                                     core.audit.record(Severity::Warning, "media.error", format!("Streaming could not start: {error}")).device(&record.id, &record.name);
-                                    send_secure(transport, &mut channel, json!({ "t": "rtc.error", "message": "The PC could not start streaming." })).await?;
+                                    send_secure(transport, &mut channel, json!({ "t": "rtc.error", "message": "The Mac could not start streaming." })).await?;
                                 }
                                 Err(_) => break EndReason::Error,
                             }
@@ -803,27 +698,19 @@ async fn run_session<T: SignalTransport>(
                         let _ = core.events.send(AgentEvent::SessionsChanged);
                         send_secure(transport, &mut channel, json!({ "t": "session.permission", "control": permission == Permission::Control })).await?;
                     }
-                    Some(SessionCommand::UsbAvailable(urls)) => {
-                        if link == Link::Lan {
-                            send_secure(transport, &mut channel, json!({ "t": "link.usb", "urls": urls })).await?;
-                        }
-                    }
                     None => break EndReason::Shutdown,
                 },
                 _ = tokio::time::sleep_until(deadline) => break EndReason::Expired,
             }
         };
         if let Some(mut handle) = media.take() {
-            stop_media(&mut handle);
+            handle.stop();
         }
         let _ = send_secure(transport, &mut channel, json!({ "t": "session.end", "reason": reason.as_str() })).await;
         Ok::<EndReason, Abort>(reason)
     }
     .await;
 
-    if let Some(credential) = &relay_media {
-        core.relay.close_route(credential.peer);
-    }
     core.sessions.unregister(session_id);
     let _ = core.events.send(AgentEvent::SessionsChanged);
     let reason = result.as_ref().map(|r| r.as_str()).unwrap_or("closed");

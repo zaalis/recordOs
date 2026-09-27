@@ -30,7 +30,7 @@ export function Welcome() {
             <span className="dim">Everywhere.</span>
           </h1>
           <p className="hero-subtitle vp-animate-in" style={{ animationDelay: '60ms' }}>
-            Turn this iPad into a precise, low-latency interface for your Windows PC — with touch, Apple Pencil and shortcuts built for creative work.
+            Turn this iPad into a precise, low-latency interface for your Mac — with touch, Apple Pencil and shortcuts built for creative work.
           </p>
         </section>
 

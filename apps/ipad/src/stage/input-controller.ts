@@ -1,16 +1,17 @@
 /**
- * Touch, Apple Pencil, trackpad and mouse → Windows input.
+ * Touch, Apple Pencil, trackpad and mouse → macOS input.
  *
  * Direct Touch: tap = click, drag = drag, long press = right click, two fingers = scroll,
- *               two-finger tap = right click, pinch = zoom, three-finger tap = hide interface.
+ *               two-finger tap = right click (Control-click), pinch = native macOS magnify,
+ *               three-finger tap = hide interface.
  * Trackpad:     one finger moves the cursor, tap = click, double-tap-and-hold = drag,
  *               two fingers = scroll (with momentum), two-finger tap = right click,
- *               three-finger swipe = configurable action.
- * Pencil:       Apple Pencil is a Windows Ink pen (pressure, tilt, hover); fingers navigate.
+ *               three-finger swipe = Mission Control / Spaces / app switcher.
+ * Pencil:       Apple Pencil is a macOS tablet pen (pressure, tilt, hover); fingers navigate.
  *
  * Every event is sent the moment it happens. Nothing waits for a video frame.
  */
-import { InputEncoder, MouseButton, PenButtons, PenPhase, VK, type MouseButtonId } from '@vision-pro/protocol';
+import { GesturePhase, InputEncoder, MouseButton, PenButtons, PenPhase, VK, type MouseButtonId } from '@vision-pro/protocol';
 import type { ControlMode, Preferences } from '../lib/storage.ts';
 import type { ViewTransform } from './view.ts';
 
@@ -72,7 +73,7 @@ type Settings = Pick<
   | 'tapToClick'
   | 'pinchAction'
   | 'threeFingerSwipe'
-  | 'pencilWindowsInk'
+  | 'pencilTablet'
   | 'pencilHover'
   | 'pencilPressureCurve'
   | 'pencilFingers'
@@ -96,7 +97,9 @@ export class InputController {
   private penHovering = false;
   private penSeenAt = 0;
   private dragArmed = false;
-  private ctrlForPinch = false;
+  /** A native magnify gesture is in progress on the Mac. */
+  private magnifying = false;
+  private magnifyIdle = 0;
   mode: ControlMode = 'direct';
   eraser = false;
   barrel = false;
@@ -162,8 +165,7 @@ export class InputController {
     cancelAnimationFrame(this.momentumFrame);
     if (this.gesture === 'drag' || this.gesture === 'track-drag') this.sink.reliable(this.encoder.button(MouseButton.Left, false, null, null));
     this.end3DGesture();
-    if (this.ctrlForPinch) this.sink.reliable(this.encoder.key(VK.Ctrl, false));
-    this.ctrlForPinch = false;
+    this.endMagnify();
     if (this.penInContact) this.penPhase(PenPhase.Cancel, 0.5, 0.5, 0, 0, 0);
     this.pointers.clear();
     this.gesture = 'none';
@@ -206,9 +208,9 @@ export class InputController {
 
   private navigationBinding(kind: 'orbit' | 'pan'): { button: MouseButtonId; keys: number[] } {
     switch (this.threeDNavigation) {
-      case 'maya': return { button: kind === 'orbit' ? MouseButton.Left : MouseButton.Middle, keys: [VK.Alt] };
+      case 'maya': return { button: kind === 'orbit' ? MouseButton.Left : MouseButton.Middle, keys: [VK.Option] };
       case 'houdini': return { button: kind === 'orbit' ? MouseButton.Left : MouseButton.Middle, keys: [VK.Space] };
-      case 'zbrush': return { button: MouseButton.Left, keys: kind === 'orbit' ? [] : [VK.Alt] };
+      case 'zbrush': return { button: MouseButton.Left, keys: kind === 'orbit' ? [] : [VK.Option] };
       case 'blender': return { button: MouseButton.Middle, keys: kind === 'orbit' ? [] : [VK.Shift] };
       default: return { button: MouseButton.Middle, keys: [] };
     }
@@ -299,10 +301,7 @@ export class InputController {
       this.lastCentroid = c;
       this.lastDist = this.twoStart.dist;
     } else if (count === 3) {
-      if (this.ctrlForPinch) {
-        this.sink.reliable(this.encoder.key(VK.Ctrl, false));
-        this.ctrlForPinch = false;
-      }
+      this.endMagnify();
       this.end3DGesture();
       this.gesture = 'three';
       this.lastCentroid = this.centroid();
@@ -396,8 +395,9 @@ export class InputController {
       if (pinchDelta > 18 && pinchDelta > panDelta * 0.6) {
         this.gesture = 'pinch';
         if (!navigateOnly && this.settings.pinchAction === 'zoom-app' && this.threeDNavigation === 'none') {
-          this.sink.reliable(this.encoder.key(VK.Ctrl, true));
-          this.ctrlForPinch = true;
+          const n = this.normalize(c.x, c.y);
+          this.sink.reliable(this.encoder.magnify(GesturePhase.Begin, 0, n.x, n.y));
+          this.magnifying = true;
         }
       } else if (panDelta > 8) {
         this.gesture = navigateOnly ? 'pinch' : this.threeDNavigation !== 'none' ? 'pan-3d' : 'scroll';
@@ -413,7 +413,16 @@ export class InputController {
     const dy = c.y - this.lastCentroid.y;
     if (this.gesture === 'pinch') {
       const navigateOnly = this.mode === 'pencil' && this.settings.pencilFingers === 'navigate';
-      if (!navigateOnly && (this.settings.pinchAction === 'zoom-app' || this.threeDNavigation !== 'none')) {
+      if (!navigateOnly && this.magnifying) {
+        // Continuous, like a Mac trackpad: every change is an incremental magnification.
+        const ratio = dist / Math.max(1, this.lastDist);
+        if (Math.abs(ratio - 1) > 0.004) {
+          const n = this.normalize(c.x, c.y);
+          this.sink.reliable(this.encoder.magnify(GesturePhase.Change, ratio - 1, n.x, n.y));
+          this.lastDist = dist;
+        }
+      } else if (!navigateOnly && (this.settings.pinchAction === 'zoom-app' || this.threeDNavigation !== 'none')) {
+        // 3D viewports zoom with the scroll wheel: one notch per 4% of spread.
         const ratio = dist / Math.max(1, this.lastDist);
         if (Math.abs(ratio - 1) > 0.04) {
           const n = this.normalize(c.x, c.y);
@@ -531,10 +540,7 @@ export class InputController {
     }
     this.pointers.delete(e.pointerId);
     if (this.pointers.size === 0) {
-      if (this.ctrlForPinch) {
-        this.sink.reliable(this.encoder.key(VK.Ctrl, false));
-        this.ctrlForPinch = false;
-      }
+      this.endMagnify();
       this.end3DGesture();
       this.gesture = 'none';
       this.dragArmed = false;
@@ -551,10 +557,7 @@ export class InputController {
     if (this.gesture === 'drag' || this.gesture === 'track-drag') {
       this.sink.reliable(this.encoder.button(MouseButton.Left, false, null, null));
     }
-    if (this.ctrlForPinch) {
-      this.sink.reliable(this.encoder.key(VK.Ctrl, false));
-      this.ctrlForPinch = false;
-    }
+    this.endMagnify();
     this.end3DGesture();
     this.pointers.clear();
     this.gesture = 'none';
@@ -605,6 +608,13 @@ export class InputController {
     this.callbacks.onFeedback('right', c.x, c.y);
   }
 
+  private endMagnify(): void {
+    window.clearTimeout(this.magnifyIdle);
+    if (!this.magnifying) return;
+    this.magnifying = false;
+    this.sink.reliable(this.encoder.magnify(GesturePhase.End, 0, null, null));
+  }
+
   private threeFingerTap(): void {
     if (this.mode === 'pencil' && this.settings.pencilFingers !== 'touch' && this.settings.twoFingerTapUndo) {
       this.callbacks.onRedo();
@@ -618,10 +628,12 @@ export class InputController {
     const action = this.settings.threeFingerSwipe;
     if (action === 'none') return;
     let keys: number[] | null = null;
-    if (action === 'task-view') keys = horizontal ? [VK.Alt, VK.Tab] : dy < 0 ? [VK.Win, VK.Tab] : [VK.Win, VK.D];
-    if (action === 'show-desktop') keys = [VK.Win, VK.D];
-    if (action === 'switch-app') keys = [VK.Alt, VK.Tab];
-    if (action === 'desktops') keys = horizontal ? [VK.Ctrl, VK.Win, dx < 0 ? VK.Right : VK.Left] : [VK.Win, VK.Tab];
+    // Same directions as a Mac trackpad: up = Mission Control, down = App Exposé,
+    // left/right = next/previous Space.
+    if (action === 'mission-control') keys = horizontal ? [VK.Control, dx < 0 ? VK.Right : VK.Left] : dy < 0 ? [VK.Control, VK.Up] : [VK.Control, VK.Down];
+    if (action === 'show-desktop') keys = [VK.F11];
+    if (action === 'switch-app') keys = [VK.Cmd, VK.Tab];
+    if (action === 'spaces') keys = horizontal ? [VK.Control, dx < 0 ? VK.Right : VK.Left] : [VK.Control, VK.Up];
     if (keys) this.sink.reliable(this.encoder.combo(keys));
   }
 
@@ -677,7 +689,7 @@ export class InputController {
       window.clearTimeout(this.longPressTimer);
     }
     const n = this.normalize(e.clientX, e.clientY);
-    if (!this.settings.pencilWindowsInk) {
+    if (!this.settings.pencilTablet) {
       this.sink.reliable(this.encoder.button(this.barrel ? MouseButton.Right : MouseButton.Left, true, n.x, n.y));
       this.penInContact = true;
       return;
@@ -692,7 +704,7 @@ export class InputController {
     e.preventDefault();
     this.penSeenAt = Date.now();
     const contact = this.penInContact && (e.buttons & 1) === 1;
-    if (!this.settings.pencilWindowsInk) {
+    if (!this.settings.pencilTablet) {
       for (const sample of coalesced(e)) {
         const n = this.normalize(sample.clientX, sample.clientY);
         if (contact) this.sink.realtime(this.encoder.moveAbs(n.x, n.y));
@@ -717,7 +729,7 @@ export class InputController {
     this.penSeenAt = Date.now();
     if (!this.penInContact) return;
     const n = this.normalize(e.clientX, e.clientY);
-    if (!this.settings.pencilWindowsInk) {
+    if (!this.settings.pencilTablet) {
       this.sink.reliable(this.encoder.button(this.barrel ? MouseButton.Right : MouseButton.Left, false, n.x, n.y));
     } else {
       const { tx, ty, twist } = this.tilt(e);
@@ -754,6 +766,18 @@ export class InputController {
       // Trackpad pinch on iPadOS arrives as ctrl+wheel.
       const point = this.stagePoint(e.clientX, e.clientY);
       this.view.zoomAt(point.x, point.y, Math.exp(-e.deltaY / 120));
+      return;
+    }
+    if (e.ctrlKey && this.settings.pinchAction === 'zoom-app' && this.threeDNavigation === 'none') {
+      // Forward a Magic Keyboard / trackpad pinch as the Mac's own magnify gesture.
+      const n = this.normalize(e.clientX, e.clientY);
+      if (!this.magnifying) {
+        this.sink.reliable(this.encoder.magnify(GesturePhase.Begin, 0, n.x, n.y));
+        this.magnifying = true;
+      }
+      this.sink.reliable(this.encoder.magnify(GesturePhase.Change, Math.exp(-e.deltaY / 120) - 1, n.x, n.y));
+      window.clearTimeout(this.magnifyIdle);
+      this.magnifyIdle = window.setTimeout(() => this.endMagnify(), 160);
       return;
     }
     const scale = e.deltaMode === 1 ? 40 : e.deltaMode === 2 ? 400 : 1;

@@ -1,6 +1,6 @@
 //! Pairing state: the "Connect Device" window (one-time QR token + 6-digit code) and the single
-//! pending approval shown on the PC. Discovery never implies authorization: every new device
-//! requires an explicit "Allow" on the PC, and code/QR proofs are verified in constant time.
+//! pending approval shown on the Mac. Discovery never implies authorization: every new device
+//! requires an explicit "Allow" on the Mac, and code/QR proofs are verified in constant time.
 
 use crate::crypto;
 use crate::events::PairingRequestInfo;
@@ -118,7 +118,7 @@ impl PairingManager {
                     Ok("code")
                 } else {
                     if window.code_attempts >= MAX_CODE_ATTEMPTS {
-                        // Burn the code; the PC shows a new one.
+                        // Burn the code; the Mac shows a new one.
                         window.code = random_code();
                         window.code_attempts = 0;
                         return Err(ProofError::CodeExhausted);

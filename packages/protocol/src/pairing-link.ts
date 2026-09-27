@@ -2,7 +2,7 @@
  * Pairing links carried by QR codes. All secrets live in the URL fragment, which browsers never
  * send to a server, so they cannot leak into access logs or proxies.
  *
- *   https://<pc>.local:47800/#/pair?a=<agentId>&fp=<agentFingerprint>&t=<oneTimeToken>&n=<pcName>
+ *   https://<mac>.local:47800/#/pair?a=<agentId>&fp=<agentFingerprint>&t=<oneTimeToken>&n=<macName>
  */
 
 export interface PairingLink {

@@ -1,4 +1,4 @@
-//! Automatic stream planning: codec selection against what the iPad offers and what this PC can
+//! Automatic stream planning: codec selection against what the iPad offers and what this Mac can
 //! encode, plus resolution, frame rate and bitrate derived from the latency profile.
 //! A codec is never forced if either side cannot handle it.
 
@@ -155,7 +155,7 @@ pub fn choose_codec(
             )
         } else {
             format!(
-                "This PC can't encode {}. Using the best available codec.",
+                "This Mac can't encode {}. Using the best available codec.",
                 codec.display()
             )
         });

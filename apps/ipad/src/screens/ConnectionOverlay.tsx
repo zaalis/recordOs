@@ -17,8 +17,7 @@ export function ConnectionOverlay() {
     }
   }, [state.phase]);
 
-  // Moving an ongoing session onto a USB cable keeps the picture on screen, without an overlay.
-  if (state.phase === 'idle' || state.phase === 'streaming' || state.switching) return null;
+  if (state.phase === 'idle' || state.phase === 'streaming') return null;
 
   if (state.phase === 'ended') {
     return null;
@@ -29,7 +28,7 @@ export function ConnectionOverlay() {
   const title = failed
     ? 'Connection stopped'
     : pairing
-      ? 'Confirm on your PC'
+      ? 'Confirm on your Mac'
       : state.phase === 'reconnecting'
         ? 'Reconnecting'
         : state.phase === 'negotiating'
@@ -43,7 +42,7 @@ export function ConnectionOverlay() {
         <h2>{title}</h2>
         {pairing && state.sas ? (
           <>
-            <p>Verify that this code matches the one shown by Vision-Pro on Windows, then approve the request there.</p>
+            <p>Verify that this code matches the one shown by Vision-Pro on the Mac, then approve the request there.</p>
             <div className="sas" aria-label={`Security code ${state.sas}`}>{state.sas}</div>
           </>
         ) : (

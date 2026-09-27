@@ -29,10 +29,10 @@ export function ScanSheet({ open, onClose }: { open: boolean; onClose: () => voi
       const link = parsePairingFragment(url.hash);
       const isSecureApp = url.protocol === 'https:';
       // The desktop shows the short-lived HTTP bootstrap QR on purpose: it lets
-      // iPadOS install this PC's local certificate before opening its HTTPS app.
+      // iPadOS install this Mac's local certificate before opening its HTTPS app.
       const isLocalBootstrap = url.protocol === 'http:' && url.port === '47801' && (url.pathname === '/' || url.pathname === '');
       if (!link || (!isSecureApp && !isLocalBootstrap)) {
-        setError('Ce code QR n’est pas un code d’association Vision-Pro valide. Ouvrez « Connecter un appareil » sur le PC et scannez le code affiché.');
+        setError('Ce code QR n’est pas un code d’association Vision-Pro valide. Ouvrez « Connecter un appareil » sur le Mac et scannez le code affiché.');
         return true;
       }
       if (url.host !== location.host) {
@@ -43,7 +43,7 @@ export function ScanSheet({ open, onClose }: { open: boolean; onClose: () => voi
       if (!identity) return false;
       onClose();
       void connection.connect(
-        { agentId: link.agentId, name: link.name || 'PC', fingerprint: link.fingerprint, mode: 'pair', proof: { kind: 'qr', secret: link.token } },
+        { agentId: link.agentId, name: link.name || 'Mac', fingerprint: link.fingerprint, mode: 'pair', proof: { kind: 'qr', secret: link.token } },
         identity,
         prefs.deviceName,
         prefs.video,
@@ -93,7 +93,7 @@ export function ScanSheet({ open, onClose }: { open: boolean; onClose: () => voi
   return (
     <Sheet open={open} title="Scanner le code QR" onClose={onClose} width={460}>
       <p className="vp-caption" style={{ margin: '0 0 14px', fontSize: 15 }}>
-        Sur votre PC, choisissez <b style={{ color: 'var(--vp-text)' }}>Connecter un appareil</b>, puis cadrez le code avec cet iPad.
+        Sur votre Mac, choisissez <b style={{ color: 'var(--vp-text)' }}>Connecter un appareil</b>, puis cadrez le code avec cet iPad.
       </p>
       {error ? (
         <div className="empty-state" role="alert">

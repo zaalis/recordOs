@@ -3,5 +3,5 @@
   "identifier": "main-capability",
   "description": "Core Vision-Pro desktop window permissions",
   "windows": ["main"],
-  "permissions": ["core:default", "core:event:default"]
+  "permissions": ["core:default", "core:event:default", "core:window:allow-start-dragging"]
 }

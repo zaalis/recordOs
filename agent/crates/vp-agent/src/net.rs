@@ -35,20 +35,27 @@ pub struct LanInterface {
     pub virtual_adapter: bool,
 }
 
+/// macOS interface names that are not the Wi-Fi/Ethernet LAN: VPN tunnels (utun, ipsec, ppp),
+/// Internet Sharing and VM bridges, AirDrop/AWDL and low-latency WLAN, Apple private links,
+/// virtualization hosts and container runtimes.
 const VIRTUAL_HINTS: &[&str] = &[
-    "vethernet",
-    "virtualbox",
-    "vmware",
-    "hyper-v",
-    "wsl",
+    "utun",
+    "ipsec",
+    "ppp",
+    "bridge",
+    "awdl",
+    "llw",
+    "anpi",
+    "ap1",
+    "vmnet",
+    "vboxnet",
     "docker",
-    "loopback",
+    "lo",
+    "gif",
+    "stf",
     "tailscale",
     "zerotier",
-    "vpn",
-    "tap",
-    "npcap",
-    "meta",
+    "feth",
 ];
 
 /// Private IPv4 interfaces, physical adapters first.
@@ -68,7 +75,14 @@ pub fn lan_interfaces() -> Vec<LanInterface> {
             _ => None,
         })
         .collect();
-    list.sort_by_key(|i| (i.virtual_adapter, i.ip.octets()[0] != 192));
+    // Physical interfaces first; en0 (built-in Wi-Fi or Ethernet) before other adapters.
+    list.sort_by_key(|i| {
+        (
+            i.virtual_adapter,
+            !i.name.starts_with("en"),
+            i.ip.octets()[0] != 192,
+        )
+    });
     list.dedup_by_key(|i| i.ip);
     list
 }

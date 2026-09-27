@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Merged by Tauri into Vision-Pro.app/Contents/Info.plist. -->
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Vision-Pro accepte les connexions de votre iPad sur le réseau local et s’annonce via Bonjour pour que l’iPad trouve ce Mac.</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_vision-pro._tcp</string>
+	</array>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.productivity</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+</dict>
+</plist>

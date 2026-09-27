@@ -14,13 +14,17 @@ export function DeviceSettingsSheet({ open, onClose }: { open: boolean; onClose:
       setConfirmReset(true);
       return;
     }
-    await resetEverything();
-    location.reload();
+    try {
+      await resetEverything(() => toast('Close other Vision-Pro tabs to finish resetting this iPad.', { icon: 'alert', tone: 'orange' }));
+      location.reload();
+    } catch {
+      toast('The reset could not be completed. Please try again.', { icon: 'alert', tone: 'orange' });
+    }
   };
 
   return (
     <Sheet open={open} title="Settings" onClose={onClose} width={560}>
-      <Group title="This iPad" footer="The name is shown on Windows when this iPad requests access.">
+      <Group title="This iPad" footer="The name is shown on the Mac when this iPad requests access.">
         <label className="field-stack">
           <span>Device name</span>
           <input
@@ -49,12 +53,12 @@ export function DeviceSettingsSheet({ open, onClose }: { open: boolean; onClose:
       </Group>
 
       <Group title="Experience">
-        <Row icon="sparkle" title="Automatic creative profiles" subtitle="Match controls to the active Windows app" accessory={<Switch label="Automatic creative profiles" checked={prefs.autoProfiles} onChange={(autoProfiles) => updatePrefs({ autoProfiles })} />} />
+        <Row icon="sparkle" title="Automatic creative profiles" subtitle="Match controls to the active Mac app" accessory={<Switch label="Automatic creative profiles" checked={prefs.autoProfiles} onChange={(autoProfiles) => updatePrefs({ autoProfiles })} />} />
         <Row icon="stats" title="Performance statistics" accessory={<Switch label="Performance statistics" checked={prefs.showStats} onChange={(showStats) => updatePrefs({ showStats })} />} />
         <Row icon="pointer" title="Show remote cursor" accessory={<Switch label="Show remote cursor" checked={prefs.showLocalCursor} onChange={(showLocalCursor) => updatePrefs({ showLocalCursor })} />} />
       </Group>
 
-      <Group title="Paired computers" footer="Retirer un ordinateur efface son autorisation locale sur cet iPad. Supprimez l’iPad depuis Windows pour couper son accès et effacer sa fiche sur le PC.">
+      <Group title="Paired computers" footer="Retirer un ordinateur efface son autorisation locale sur cet iPad. Supprimez l’iPad depuis Vision-Pro sur le Mac pour couper son accès et effacer sa fiche.">
         {computers.length === 0 ? (
           <Row icon="computer" title="No paired computers" />
         ) : (
@@ -78,7 +82,7 @@ export function DeviceSettingsSheet({ open, onClose }: { open: boolean; onClose:
         )}
       </Group>
 
-      <Group title="Privacy & security" footer="Resetting creates a new device identity. Every PC will require explicit pairing again.">
+      <Group title="Privacy & security" footer="Resetting creates a new device identity. Every Mac will require explicit pairing again.">
         <Row icon="lock" title="Private key" subtitle="Non-extractable and stored only on this iPad" value="Protected" />
         <div className="field-stack">
           <Button variant="danger" block onClick={() => void reset()}>

@@ -15,16 +15,12 @@ export interface KnownComputer {
   port: number;
   pairedAt: number;
   lastConnectedAt: number | null;
-  /** Relay announced by this PC during its last session; used when the PC is not on this network. */
-  relayUrl?: string;
-  /** USB cable endpoints this PC announced; tried when the PC is not reachable over Wi-Fi. */
-  usbUrls?: string[];
 }
 
 export type ControlMode = 'direct' | 'trackpad' | 'pencil';
 export type StageMode = 'stream' | 'tablet';
 export type PinchAction = 'zoom-view' | 'zoom-app';
-export type ThreeFingerAction = 'none' | 'task-view' | 'show-desktop' | 'switch-app' | 'desktops';
+export type ThreeFingerAction = 'none' | 'mission-control' | 'show-desktop' | 'switch-app' | 'spaces';
 export type PencilFingers = 'navigate' | 'ignore' | 'touch';
 
 export interface Preferences {
@@ -41,12 +37,12 @@ export interface Preferences {
   tapToClick: boolean;
   pinchAction: PinchAction;
   threeFingerSwipe: ThreeFingerAction;
-  pencilWindowsInk: boolean;
+  /** Apple Pencil acts as a macOS tablet pen (pressure, tilt) instead of a plain mouse. */
+  pencilTablet: boolean;
   pencilHover: boolean;
   pencilPressureCurve: 'soft' | 'linear' | 'firm';
   pencilFingers: PencilFingers;
   twoFingerTapUndo: boolean;
-  commandAsCtrl: boolean;
   autoHideToolbar: boolean;
   autoProfiles: boolean;
   showStats: boolean;
@@ -70,26 +66,25 @@ export const DEFAULT_PREFERENCES: Preferences = {
   // Pinch controls the remote app by default. The former local-only zoom is
   // still available in Settings for users who need to inspect small UI text.
   pinchAction: 'zoom-app',
-  threeFingerSwipe: 'task-view',
-  pencilWindowsInk: true,
+  threeFingerSwipe: 'mission-control',
+  pencilTablet: true,
   pencilHover: true,
   pencilPressureCurve: 'linear',
   pencilFingers: 'navigate',
   twoFingerTapUndo: true,
-  commandAsCtrl: true,
   autoHideToolbar: true,
   autoProfiles: true,
   showStats: false,
   showLocalCursor: true,
   toolbar: { edge: 'bottom', offset: 0.5, collapsed: false },
-  activeProfileId: 'windows',
+  activeProfileId: 'macos',
   keyboardExtras: [],
 };
 
 let dbPromise: Promise<IDBDatabase> | null = null;
 
 function db(): Promise<IDBDatabase> {
-  dbPromise ??= new Promise((resolve, reject) => {
+  dbPromise ??= new Promise<IDBDatabase>((resolve, reject) => {
     const request = indexedDB.open(DB_NAME, DB_VERSION);
     request.onupgradeneeded = () => {
       const database = request.result;
@@ -99,8 +94,12 @@ function db(): Promise<IDBDatabase> {
     };
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
+  }).catch((error: unknown) => {
+    // A transient IndexedDB failure must not poison all later retries.
+    dbPromise = null;
+    throw error;
   });
-  return dbPromise;
+  return dbPromise as Promise<IDBDatabase>;
 }
 
 function run<T>(store: string, mode: IDBTransactionMode, fn: (s: IDBObjectStore) => IDBRequest<T>): Promise<T> {
@@ -109,8 +108,10 @@ function run<T>(store: string, mode: IDBTransactionMode, fn: (s: IDBObjectStore)
       new Promise<T>((resolve, reject) => {
         const tx = database.transaction(store, mode);
         const request = fn(tx.objectStore(store));
-        request.onsuccess = () => resolve(request.result);
-        request.onerror = () => reject(request.error);
+        let result: T;
+        request.onsuccess = () => { result = request.result; };
+        tx.oncomplete = () => resolve(result);
+        tx.onabort = () => reject(tx.error ?? request.error ?? new Error('IndexedDB transaction aborted'));
       }),
   );
 }
@@ -191,7 +192,7 @@ export async function deleteProfile(id: string): Promise<void> {
 }
 
 /** Removes every local secret and pairing (Settings → Reset this iPad). */
-export async function resetEverything(): Promise<void> {
+export async function resetEverything(onBlocked?: () => void): Promise<void> {
   const database = await db();
   database.close();
   dbPromise = null;
@@ -199,6 +200,6 @@ export async function resetEverything(): Promise<void> {
     const request = indexedDB.deleteDatabase(DB_NAME);
     request.onsuccess = () => resolve();
     request.onerror = () => reject(request.error);
-    request.onblocked = () => resolve();
+    request.onblocked = () => onBlocked?.();
   });
 }

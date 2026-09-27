@@ -10,7 +10,7 @@
     fetch(target + 'api/info', { mode: 'no-cors', cache: 'no-store' })
       .then(function () {
         status.className = 'status ok';
-        text.textContent = 'Cet iPad fait déjà confiance à votre PC. Vous pouvez continuer.';
+        text.textContent = 'Cet iPad fait déjà confiance à votre Mac. Vous pouvez continuer.';
       })
       .catch(function () {
         status.className = 'status';

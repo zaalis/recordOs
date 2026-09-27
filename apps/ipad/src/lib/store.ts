@@ -1,8 +1,7 @@
 /** App-wide state with a tiny external store (no framework dependency). */
-import { type AppProfile, BUILTIN_PROFILES, type DeviceIdentity, cableSignalingUrls, ipadHotspotUrls } from '@vision-pro/protocol';
+import { type AppProfile, BUILTIN_PROFILES, type DeviceIdentity } from '@vision-pro/protocol';
 import { useSyncExternalStore } from 'react';
-import { connection } from './connection.ts';
-import { type AgentInfo, deviceKind, fetchAgentInfo, fetchNearby, type NearbyAgent } from './platform.ts';
+import { type AgentInfo, fetchAgentInfo, fetchNearby, type NearbyAgent } from './platform.ts';
 import {
   DEFAULT_PREFERENCES,
   type KnownComputer,
@@ -81,34 +80,7 @@ export async function initialize(): Promise<void> {
 export async function refreshNearby(): Promise<void> {
   const [agent, nearby] = await Promise.all([fetchAgentInfo(), fetchNearby()]);
   set({ agent, nearby });
-  if (agent) void learnCable(agent.agentId, cableSignalingUrls(agent.usb?.urls));
 }
-
-/** Remembers the cable endpoints a paired PC announces, for when Wi-Fi is not available. */
-async function learnCable(agentId: string, urls: string[]): Promise<void> {
-  const known = state.computers.find((c) => c.agentId === agentId);
-  if (!known || !urls.length || JSON.stringify(known.usbUrls ?? []) === JSON.stringify(urls)) return;
-  await rememberComputer({ ...known, usbUrls: urls });
-}
-
-/**
- * Cable endpoints to try for a PC. When the app can ask the PC (its origin answers), the PC's
- * current answer is authoritative. Otherwise (no Wi-Fi), use the endpoints learned earlier and, on
- * an iPad, the addresses its Personal Hotspot gives a PC over USB.
- */
-export async function cableEndpoints(agentId: string, known: string[] = []): Promise<string[]> {
-  const info = await fetchAgentInfo(AbortSignal.timeout(1500));
-  if (info?.agentId === agentId) {
-    const urls = cableSignalingUrls(info.usb?.urls);
-    void learnCable(agentId, urls);
-    return urls;
-  }
-  const computer = state.computers.find((c) => c.agentId === agentId);
-  const guesses = deviceKind() === 'ipad' ? ipadHotspotUrls(computer?.port ?? 47800) : [];
-  return cableSignalingUrls([...known, ...(computer?.usbUrls ?? []), ...guesses]);
-}
-
-connection.cablePaths = cableEndpoints;
 
 export function setScreen(screen: Screen): void {
   set({ screen });
@@ -147,5 +119,5 @@ export async function upsertProfile(profile: AppProfile): Promise<void> {
 export async function removeProfile(id: string): Promise<void> {
   await deleteProfile(id);
   set({ customProfiles: await listProfiles() });
-  if (state.prefs.activeProfileId === id) updatePrefs({ activeProfileId: 'windows' });
+  if (state.prefs.activeProfileId === id) updatePrefs({ activeProfileId: 'macos' });
 }

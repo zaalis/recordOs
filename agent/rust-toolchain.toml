@@ -1,2 +1,4 @@
 [toolchain]
 channel = "stable"
+# Apple silicon and Intel Macs; both are needed for `npm run build:mac:universal`.
+targets = ["aarch64-apple-darwin", "x86_64-apple-darwin"]

@@ -10,7 +10,6 @@ use crate::input::{self, InputCategory, InputEvent, SequenceFilter};
 use crate::platform::capture::{encode_png, CursorShape, CursorState};
 use crate::platform::inject::{InjectCommand, InputPolicy};
 use crate::protocol::{AgentStats, AppliedVideo, ControlToAgent, DisplayInfo};
-use crate::relay::{RelayMediaLink, RelaySender};
 use crate::session::SessionInfo;
 use crate::util::{b64u, now_ms};
 use parking_lot::{Mutex, RwLock};
@@ -42,6 +41,7 @@ pub struct EncodedVideo {
 }
 
 pub enum PipelineEvent {
+    Video(EncodedVideo),
     Cursor {
         state: CursorState,
         width: u32,
@@ -95,7 +95,6 @@ pub struct Negotiated {
     pub rtc: Rtc,
     pub answer: String,
     pub sockets: Vec<UdpSocket>,
-    pub relay: Option<RelayMediaLink>,
 }
 
 static CRYPTO: Once = Once::new();
@@ -105,7 +104,6 @@ pub fn negotiate(
     codec: CodecId,
     ips: &[Ipv4Addr],
     initial_kbps: u32,
-    relay: Option<RelayMediaLink>,
 ) -> anyhow::Result<Negotiated> {
     CRYPTO.call_once(|| str0m::crypto::from_feature_flags().install_process_default());
     let initial_bwe = initial_bwe_kbps(initial_kbps);
@@ -136,19 +134,7 @@ pub fn negotiate(
             Err(error) => tracing::debug!(%error, %addr, "skipping candidate"),
         }
     }
-    // ICE-lite only accepts host candidates: the relay's virtual address is announced as one.
-    if let Some(link) = &relay {
-        let candidate = Candidate::host(link.sender.local(), "udp")
-            .map_err(|e| anyhow::anyhow!("relay candidate: {e}"))?;
-        anyhow::ensure!(
-            rtc.add_local_candidate(candidate).is_some(),
-            "relay candidate was rejected"
-        );
-    }
-    anyhow::ensure!(
-        !sockets.is_empty() || relay.is_some(),
-        "no usable local network address"
-    );
+    anyhow::ensure!(!sockets.is_empty(), "no usable local network address");
     let offer =
         SdpOffer::from_sdp_string(offer_sdp).map_err(|e| anyhow::anyhow!("invalid offer: {e}"))?;
     let answer = rtc
@@ -159,15 +145,11 @@ pub fn negotiate(
         rtc,
         answer: answer.to_sdp_string(),
         sockets,
-        relay,
     })
 }
 
 pub struct RtcContext {
     pub codec: CodecId,
-    /// Encoded frames (at most two queued: stale video is dropped, never delayed).
-    pub video: tokio::sync::mpsc::Receiver<EncodedVideo>,
-    /// Cursor, display and encoder notifications.
     pub events: tokio::sync::mpsc::Receiver<PipelineEvent>,
     pub pipeline: crossbeam_channel::Sender<PipelineCommand>,
     pub injector: crossbeam_channel::Sender<InjectCommand>,
@@ -212,10 +194,7 @@ struct State {
 
 pub async fn run(negotiated: Negotiated, ctx: RtcContext) {
     let Negotiated {
-        mut rtc,
-        sockets,
-        relay,
-        ..
+        mut rtc, sockets, ..
     } = negotiated;
     let mut udp: Vec<Arc<tokio::net::UdpSocket>> = vec![];
     for socket in sockets {
@@ -257,22 +236,6 @@ pub async fn run(negotiated: Negotiated, ctx: RtcContext) {
             }
         }));
     }
-    let relay_sender: Option<RelaySender> = relay.as_ref().map(|link| link.sender.clone());
-    if let Some(RelayMediaLink {
-        mut incoming,
-        sender,
-    }) = relay
-    {
-        let net_tx = net_tx.clone();
-        let local = sender.local();
-        readers.push(tokio::spawn(async move {
-            while let Some((source, data)) = incoming.recv().await {
-                if net_tx.send((data, source, local)).await.is_err() {
-                    break;
-                }
-            }
-        }));
-    }
     drop(net_tx);
 
     let app_watch = ctx.settings.input.detect_active_app;
@@ -304,7 +267,7 @@ pub async fn run(negotiated: Negotiated, ctx: RtcContext) {
     let mut connect_deadline = Some(Instant::now() + Duration::from_secs(20));
     let mut stop = state.ctx.stop.clone();
 
-    while let Some(timeout) = drain(&mut rtc, &udp, relay_sender.as_ref(), &mut state) {
+    while let Some(timeout) = drain(&mut rtc, &udp, &mut state) {
         if state.ended || !rtc.is_alive() {
             break;
         }
@@ -329,10 +292,6 @@ pub async fn run(negotiated: Negotiated, ctx: RtcContext) {
                         break;
                     }
                 }
-            }
-            video = state.ctx.video.recv() => {
-                let Some(video) = video else { break };
-                write_video(&mut rtc, &mut state, video);
             }
             event = state.ctx.events.recv() => {
                 let Some(event) = event else { break };
@@ -376,20 +335,12 @@ pub async fn run(negotiated: Negotiated, ctx: RtcContext) {
 }
 
 /// Drains `poll_output` until a timeout. Returns `None` when the peer is gone.
-fn drain(
-    rtc: &mut Rtc,
-    udp: &[Arc<tokio::net::UdpSocket>],
-    relay: Option<&RelaySender>,
-    state: &mut State,
-) -> Option<Instant> {
+fn drain(rtc: &mut Rtc, udp: &[Arc<tokio::net::UdpSocket>], state: &mut State) -> Option<Instant> {
     loop {
         match rtc.poll_output() {
             Ok(Output::Timeout(t)) => return Some(t),
             Ok(Output::Transmit(transmit)) => {
-                if let Some(relay) = relay.filter(|r| r.local() == transmit.source) {
-                    relay.send(transmit.destination, &transmit.contents);
-                    state.sent_bytes.0 += transmit.contents.len() as u64;
-                } else if let Some(socket) = udp
+                if let Some(socket) = udp
                     .iter()
                     .find(|s| s.local_addr().ok() == Some(transmit.source))
                 {
@@ -648,28 +599,27 @@ fn queue_shape(state: &mut State, shape: &CursorShape) {
     }
 }
 
-fn write_video(rtc: &mut Rtc, state: &mut State, video: EncodedVideo) {
-    if !state.connected {
-        return;
-    }
-    let (Some(mid), Some(pt)) = (state.video_mid, state.pt) else {
-        return;
-    };
-    if let Some(writer) = rtc.writer(mid) {
-        match writer.write(
-            pt,
-            video.captured_at,
-            MediaTime::from_90khz(video.rtp_time),
-            video.data,
-        ) {
-            Ok(()) => state.sent_bytes.2 += 1,
-            Err(error) => tracing::debug!(%error, "video write failed"),
-        }
-    }
-}
-
 fn handle_pipeline_event(rtc: &mut Rtc, state: &mut State, event: PipelineEvent) {
     match event {
+        PipelineEvent::Video(video) => {
+            if !state.connected {
+                return;
+            }
+            let (Some(mid), Some(pt)) = (state.video_mid, state.pt) else {
+                return;
+            };
+            if let Some(writer) = rtc.writer(mid) {
+                match writer.write(
+                    pt,
+                    video.captured_at,
+                    MediaTime::from_90khz(video.rtp_time),
+                    video.data,
+                ) {
+                    Ok(()) => state.sent_bytes.2 += 1,
+                    Err(error) => tracing::debug!(%error, "video write failed"),
+                }
+            }
+        }
         PipelineEvent::Cursor {
             state: cursor,
             width,
@@ -742,13 +692,14 @@ fn periodic(state: &mut State) {
         (state.ctx.on_change)();
     }
     if state.app_watch && state.control.is_some() {
-        let exe = crate::platform::system::foreground_executable();
-        if exe != state.last_app {
-            if let Some(name) = &exe {
-                state.pending_control.push(json!({ "t": "app.active", "exe": name, "profile": crate::platform::system::profile_for(name) }).to_string());
-                state.ctx.info.write().active_app = Some(name.clone());
+        // The application is identified by its bundle identifier (e.g. org.blenderfoundation.blender).
+        let app = crate::platform::system::foreground_app();
+        if app != state.last_app {
+            if let Some(bundle) = &app {
+                state.pending_control.push(json!({ "t": "app.active", "exe": bundle, "profile": crate::platform::system::profile_for(bundle) }).to_string());
+                state.ctx.info.write().active_app = Some(bundle.clone());
             }
-            state.last_app = exe;
+            state.last_app = app;
         }
     }
 }

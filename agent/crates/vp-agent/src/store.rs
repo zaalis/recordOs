@@ -1,5 +1,6 @@
-//! Authorized device registry (%APPDATA%\Vision-Pro\devices.json), integrity-protected with an
-//! HMAC keyed by the DPAPI-protected identity. A tampered file downgrades every device to untrusted.
+//! Authorized device registry (~/Library/Application Support/Vision-Pro/devices.json),
+//! integrity-protected with an HMAC keyed by the Keychain-protected identity.
+//! A tampered file downgrades every device to untrusted.
 
 use crate::identity::AgentIdentity;
 use crate::paths;
@@ -10,7 +11,7 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "lowercase")]
 pub enum DeviceStatus {
     Trusted,
-    /// Known key, but trust expired or was withdrawn: the next connection needs confirmation on the PC.
+    /// Known key, but trust expired or was withdrawn: the next connection needs confirmation on the Mac.
     Untrusted,
     /// Legacy on-disk status. Revoked records are removed during loading.
     ///
@@ -215,7 +216,7 @@ impl DeviceStore {
     }
 
     /// Removes every authorization record for a device. Future access must use a
-    /// fresh pairing request approved on this PC.
+    /// fresh pairing request approved on this Mac.
     pub fn revoke(&mut self, id: &str) -> bool {
         self.forget(id)
     }
@@ -226,7 +227,7 @@ impl DeviceStore {
         before != self.devices.len()
     }
 
-    /// Removes every stored device, for example when this PC receives a new
+    /// Removes every stored device, for example when this Mac receives a new
     /// identity. No stale authorization is retained under the new identity.
     pub fn clear(&mut self) -> bool {
         if self.devices.is_empty() {

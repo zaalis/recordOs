@@ -12,6 +12,7 @@ pub const KIND_PEN: u8 = 0x07;
 pub const KIND_TOUCH: u8 = 0x08;
 pub const KIND_COMBO: u8 = 0x09;
 pub const KIND_RELEASE_ALL: u8 = 0x0a;
+pub const KIND_MAGNIFY: u8 = 0x0b;
 pub const KIND_CURSOR: u8 = 0x40;
 
 pub const EXTENDED: u16 = 0x100;
@@ -44,6 +45,14 @@ pub enum TouchPhase {
     Move,
     Up,
     Cancel,
+}
+
+/// Phase of a trackpad-style magnify (pinch) gesture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GesturePhase {
+    Begin,
+    Change,
+    End,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -86,6 +95,8 @@ pub enum InputEvent {
     Wheel {
         dx: f32,
         dy: f32,
+        /// Pixel-precise deltas (trackpad, fingers) rather than wheel notches.
+        precise: bool,
         at: Option<(f32, f32)>,
     },
     Key {
@@ -96,6 +107,13 @@ pub enum InputEvent {
     Pen(PenSample),
     Touch(Vec<TouchContact>),
     Combo(Vec<u16>),
+    /// Pinch-to-zoom forwarded as a native macOS magnify gesture.
+    Magnify {
+        phase: GesturePhase,
+        /// Incremental magnification (0.1 = 10% larger than the previous event).
+        delta: f32,
+        at: Option<(f32, f32)>,
+    },
     ReleaseAll,
 }
 
@@ -105,7 +123,8 @@ impl InputEvent {
             InputEvent::MoveAbs { .. }
             | InputEvent::MoveRel { .. }
             | InputEvent::Button { .. }
-            | InputEvent::Wheel { .. } => InputCategory::Mouse,
+            | InputEvent::Wheel { .. }
+            | InputEvent::Magnify { .. } => InputCategory::Mouse,
             InputEvent::Key { .. } | InputEvent::Text(_) | InputEvent::Combo(_) => {
                 InputCategory::Keyboard
             }
@@ -125,7 +144,8 @@ pub enum InputCategory {
     System,
 }
 
-/// Windows virtual keys accepted from the iPad (see packages/protocol/src/keys.ts).
+/// Vision-Pro key codes accepted from the iPad (see packages/protocol/src/keys.ts and
+/// platform/keymap.rs for the translation to macOS keys).
 pub fn is_allowed_vk(vk: u16) -> bool {
     let base = vk & 0xff;
     let extended = vk & EXTENDED != 0;
@@ -215,10 +235,10 @@ pub fn decode(data: &[u8]) -> Option<(u16, InputEvent)> {
             if !dx.is_finite() || !dy.is_finite() || dx.abs() > 12_000.0 || dy.abs() > 12_000.0 {
                 return None;
             }
-            let _precise = flags & 1 != 0;
             InputEvent::Wheel {
                 dx,
                 dy,
+                precise: flags & 1 != 0,
                 at: position(data, 12)?,
             }
         }
@@ -328,6 +348,23 @@ pub fn decode(data: &[u8]) -> Option<(u16, InputEvent)> {
             }
             InputEvent::Combo(keys)
         }
+        KIND_MAGNIFY if data.len() == 20 => {
+            let phase = match data[4] {
+                0 => GesturePhase::Begin,
+                1 => GesturePhase::Change,
+                2 => GesturePhase::End,
+                _ => return None,
+            };
+            let delta = f32_at(data, 8);
+            if !delta.is_finite() || delta.abs() > 4.0 {
+                return None;
+            }
+            InputEvent::Magnify {
+                phase,
+                delta,
+                at: position(data, 12)?,
+            }
+        }
         KIND_RELEASE_ALL if data.len() == 4 => InputEvent::ReleaseAll,
         _ => return None,
     };
@@ -410,6 +447,22 @@ mod tests {
         c[6..8].copy_from_slice(&0x11u16.to_le_bytes());
         c[8..10].copy_from_slice(&0x5au16.to_le_bytes());
         assert_eq!(decode(&c).unwrap().1, InputEvent::Combo(vec![0x11, 0x5a]));
+
+        let mut g = header(KIND_MAGNIFY, 20);
+        g[4] = 1;
+        g[8..12].copy_from_slice(&0.125f32.to_le_bytes());
+        g[12..16].copy_from_slice(&0.5f32.to_le_bytes());
+        g[16..20].copy_from_slice(&0.25f32.to_le_bytes());
+        assert_eq!(
+            decode(&g).unwrap().1,
+            InputEvent::Magnify {
+                phase: GesturePhase::Change,
+                delta: 0.125,
+                at: Some((0.5, 0.25))
+            }
+        );
+        g[8..12].copy_from_slice(&f32::NAN.to_le_bytes());
+        assert!(decode(&g).is_none());
     }
 
     #[test]
@@ -421,7 +474,7 @@ mod tests {
         assert!(decode(&m).is_none());
         assert!(decode(&header(KIND_MOVE_ABS, 13)).is_none());
         let mut k = header(KIND_KEY, 8);
-        k[4..6].copy_from_slice(&0x5cu16.to_le_bytes()); // right Windows key is not in the allowlist
+        k[4..6].copy_from_slice(&0x5cu16.to_le_bytes()); // right-hand Command code is not in the allowlist
         assert!(decode(&k).is_none());
         k[4..6].copy_from_slice(&0xffffu16.to_le_bytes());
         assert!(decode(&k).is_none());

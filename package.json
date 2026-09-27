@@ -2,7 +2,7 @@
   "name": "vision-pro",
   "private": true,
   "version": "0.1.0",
-  "description": "Vision-Pro — turn an iPad into an advanced remote interface for a Windows PC.",
+  "description": "Vision-Pro — turn an iPad into an advanced remote interface for a Mac.",
   "workspaces": [
     "packages/*",
     "apps/*",
@@ -11,16 +11,24 @@
   "scripts": {
     "dev:ipad": "npm run dev -w @vision-pro/ipad",
     "dev:desktop": "npm run dev -w @vision-pro/desktop",
+    "dev:mac": "npm run build -w @vision-pro/ipad && npm run tauri -w @vision-pro/desktop -- dev",
     "dev:server": "npm run dev -w @vision-pro/server",
     "build:web": "npm run build -w @vision-pro/ipad && npm run build -w @vision-pro/desktop",
+    "build:mac": "npm run build:web && npm run tauri -w @vision-pro/desktop -- build",
+    "build:mac:universal": "npm run build:web && npm run tauri -w @vision-pro/desktop -- build --target universal-apple-darwin",
+    "agent": "npm run build -w @vision-pro/ipad && cargo run --manifest-path agent/Cargo.toml --bin vp-agentd --",
     "build:server": "npm run build -w @vision-pro/server",
     "typecheck": "npm run typecheck --workspaces --if-present",
-    "test": "npm run test --workspaces --if-present"
+    "test": "npm run test --workspaces --if-present",
+    "test:agent": "npm run build -w @vision-pro/ipad && cargo test --manifest-path agent/Cargo.toml --workspace"
   },
   "engines": {
     "node": ">=22.12"
   },
   "devDependencies": {
     "@types/node": "^24.3.0"
-  }
+  },
+  "os": [
+    "darwin"
+  ]
 }

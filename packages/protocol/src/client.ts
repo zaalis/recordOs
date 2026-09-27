@@ -30,9 +30,9 @@ export interface SignalingOptions {
   deviceName: string;
   deviceKind: DeviceKind;
   mode: 'pair' | 'auth';
-  /** Pinned agent fingerprint (known PC or QR code). Strongly recommended. */
+  /** Pinned agent fingerprint (known Mac or QR code). Strongly recommended. */
   expectedFingerprint?: string;
-  /** One-time secret from a QR code or the 6-digit code shown on the PC. */
+  /** One-time secret from a QR code or the 6-digit code shown on the Mac. */
   proof?: { kind: 'qr' | 'code'; secret: string };
   WebSocketImpl?: typeof WebSocket;
 }
@@ -122,24 +122,29 @@ export class SignalingClient {
   async send(message: { t: string } & Record<string, unknown>): Promise<void> {
     if (!this.channel || this.stage !== 'secure') throw new Error('channel not ready');
     const frames = await this.channel.seal(message);
-    for (const frame of frames) this.socket?.send(JSON.stringify(frame));
+    if (this.socket?.readyState !== 1) throw new Error('signaling socket closed');
+    for (const frame of frames) this.socket.send(JSON.stringify(frame));
   }
 
   close(): void {
     this.clearHandshakeTimer();
-    if (this.stage === 'secure') {
-      void this.send({ t: 'session.close' }).catch(() => undefined);
-    }
+    if (this.stage === 'closed') return;
+    const socket = this.socket;
+    // Give an explicit disconnect a chance to reach the agent, but always
+    // release the transport even if WebCrypto is suspended by Safari.
+    if (this.stage === 'secure' && socket?.readyState === 1) {
+      void this.send({ t: 'session.close' }).catch(() => undefined).finally(() => socket.close());
+      setTimeout(() => socket.close(), 250);
+    } else socket?.close();
     this.stage = 'closed';
-    setTimeout(() => this.socket?.close(), 50);
   }
 
   private fail(code: string): void {
     if (this.stage === 'closed') return;
     this.clearHandshakeTimer();
-    this.emit({ type: 'error', code });
     this.stage = 'closed';
     this.socket?.close();
+    this.emit({ type: 'error', code });
   }
 
   private async handle(text: string): Promise<void> {
@@ -148,13 +153,14 @@ export class SignalingClient {
     const message = JSON.parse(text) as Record<string, unknown>;
 
     if (message.t === 'error') {
+      this.clearHandshakeTimer();
+      this.stage = 'closed';
+      this.socket?.close();
       this.emit({
         type: 'error',
         code: String(message.code),
         ...(typeof message.retryAfterMs === 'number' ? { retryAfterMs: message.retryAfterMs } : {}),
       });
-      this.stage = 'closed';
-      this.socket?.close();
       return;
     }
 
@@ -187,6 +193,9 @@ export class SignalingClient {
         this.sendPlain({ t: 'prove', sig });
         this.stage = 'secure';
         this.clearHandshakeTimer();
+        // Authentication must also complete; reaching the encrypted channel
+        // alone is not enough to start video. Pairing gets its approval window.
+        this.handshakeTimer = setTimeout(() => this.fail('unreachable'), this.options.mode === 'pair' ? 90_000 : 20_000);
         if (this.options.mode === 'pair') {
           const proof = this.options.proof
             ? { kind: this.options.proof.kind, mac: b64u(await pairProofMac(this.options.proof.secret, keys.transcript)) }
@@ -207,6 +216,7 @@ export class SignalingClient {
             this.emit({ type: 'paired', approved: opened.approved === true });
             return;
           case 'session.ready':
+            this.clearHandshakeTimer();
             this.emit({ type: 'ready', session: opened as unknown as SessionReady, sas: this.keys!.sas });
             return;
           default:
@@ -222,69 +232,4 @@ export class SignalingClient {
       this.handshakeTimer = undefined;
     }
   }
-}
-
-/**
- * Checks that a signaling endpoint answers with the expected PC, without authenticating: the
- * handshake stops after the agent's plaintext `hello`. Used to pick a USB cable path before
- * connecting (only the tablet at the other end of the cable can reach a cable address).
- */
-export function probeAgent(url: string, agentId: string, timeoutMs = 1500, WebSocketImpl: typeof WebSocket = WebSocket): Promise<boolean> {
-  return new Promise((resolve) => {
-    let socket: WebSocket | undefined;
-    let settled = false;
-    const finish = (ok: boolean) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      if (socket) {
-        socket.onmessage = socket.onerror = socket.onclose = null;
-        try {
-          socket.close();
-        } catch {
-          /* already closed */
-        }
-      }
-      resolve(ok);
-    };
-    const timer = setTimeout(() => finish(false), timeoutMs);
-    try {
-      socket = new WebSocketImpl(url);
-    } catch {
-      finish(false);
-      return;
-    }
-    socket.onmessage = (event: MessageEvent) => {
-      try {
-        const hello = JSON.parse(String(event.data)) as { t?: unknown; agentId?: unknown };
-        finish(hello.t === 'hello' && hello.agentId === agentId);
-      } catch {
-        finish(false);
-      }
-    };
-    socket.onerror = () => finish(false);
-    socket.onclose = () => finish(false);
-  });
-}
-
-/** First endpoint (in list order of answers) that reaches the expected PC, or null. */
-export function firstReachable(urls: string[], agentId: string, timeoutMs = 1500, WebSocketImpl: typeof WebSocket = WebSocket): Promise<string | null> {
-  if (!urls.length) return Promise.resolve(null);
-  return new Promise((resolve) => {
-    let pending = urls.length;
-    let settled = false;
-    for (const url of urls) {
-      void probeAgent(url, agentId, timeoutMs, WebSocketImpl).then((ok) => {
-        pending -= 1;
-        if (settled) return;
-        if (ok) {
-          settled = true;
-          resolve(url);
-        } else if (pending === 0) {
-          settled = true;
-          resolve(null);
-        }
-      });
-    }
-  });
 }

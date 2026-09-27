@@ -23,30 +23,33 @@
       "center": true,
       "decorations": true,
       "transparent": false,
+      "titleBarStyle": "Overlay",
+      "hiddenTitle": true,
       "backgroundColor": "#0a0a0b"
     }]
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis"],
-    "shortDescription": "Turn an iPad into an advanced remote interface for Windows.",
-    "category": "Productivity",
-    "copyright": "Copyright © 2026 Vision-Pro",
+    "targets": ["app", "dmg"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.icns",
-      "icons/icon.ico"
+      "icons/icon.png"
     ],
-    "windows": {
-      "nsis": {
-        "headerImage": "installer/header.bmp",
-        "sidebarImage": "installer/sidebar.bmp",
-        "installerIcon": "icons/icon.ico",
-        "languages": ["English"],
-        "displayLanguageSelector": false,
-        "compression": "lzma"
+    "shortDescription": "Turn an iPad into an advanced remote interface for your Mac.",
+    "longDescription": "Vision-Pro streams your Mac to an iPad over a direct, encrypted local connection, with touch, trackpad, Apple Pencil pressure and creative-app shortcuts.",
+    "category": "Productivity",
+    "copyright": "Copyright © 2026 Vision-Pro",
+    "macOS": {
+      "minimumSystemVersion": "13.0",
+      "hardenedRuntime": true,
+      "signingIdentity": "-",
+      "dmg": {
+        "windowSize": { "width": 640, "height": 400 },
+        "appPosition": { "x": 180, "y": 200 },
+        "applicationFolderPosition": { "x": 460, "y": 200 }
       }
     }
   }

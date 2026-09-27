@@ -3,7 +3,7 @@
 //! The iPad trusts the authority once (configuration profile); nothing is exposed to the Internet.
 
 use crate::paths;
-use crate::platform::dpapi;
+use crate::platform::keychain;
 use crate::util::{b64u, from_b64u, now_ms};
 use rcgen::{
     BasicConstraints, CertificateParams, CidrSubnet, DnType, ExtendedKeyUsagePurpose,
@@ -39,6 +39,7 @@ impl LocalAuthority {
             match Self::decode(&wrapped) {
                 Ok(authority) if !authority.expires_soon() => return Ok(authority),
                 Ok(_) => tracing::info!("local authority close to expiry; renewing"),
+                Err(error) if keychain::is_unavailable(&error) => return Err(error),
                 Err(error) => {
                     tracing::error!(%error, "local authority unreadable; creating a new one")
                 }
@@ -52,12 +53,12 @@ impl LocalAuthority {
             created_at: authority.created_at,
         };
         let plain = Zeroizing::new(serde_json::to_vec(&stored)?);
-        paths::write_atomic(&path, &dpapi::protect(&plain, PURPOSE)?)?;
+        paths::write_atomic(&path, &keychain::protect(&plain, PURPOSE)?)?;
         Ok(authority)
     }
 
     fn decode(wrapped: &[u8]) -> anyhow::Result<LocalAuthority> {
-        let plain = Zeroizing::new(dpapi::unprotect(wrapped, PURPOSE)?);
+        let plain = Zeroizing::new(keychain::unprotect(wrapped, PURPOSE)?);
         let stored: StoredAuthority = serde_json::from_slice(&plain)?;
         let key_der =
             Zeroizing::new(from_b64u(&stored.key, None).ok_or_else(|| anyhow::anyhow!("bad key"))?);

@@ -1,8 +1,9 @@
-//! Long-term agent identity (ECDSA P-256) and local integrity key, protected at rest with DPAPI.
+//! Long-term agent identity (ECDSA P-256) and local integrity key, sealed at rest with a key held
+//! in the macOS login Keychain.
 
 use crate::crypto;
 use crate::paths;
-use crate::platform::dpapi;
+use crate::platform::keychain;
 use crate::util::{b64u, from_b64u, now_ms, random_bytes};
 use p256::ecdsa::{SigningKey, VerifyingKey};
 use p256::pkcs8::{DecodePrivateKey, EncodePrivateKey};
@@ -35,6 +36,9 @@ impl AgentIdentity {
         if let Ok(wrapped) = std::fs::read(&path) {
             match Self::decode(&wrapped) {
                 Ok(identity) => return Ok(identity),
+                // A locked or refused Keychain is not corruption: never replace the identity
+                // (which would silently unpair every iPad) — report it and let the user retry.
+                Err(error) if keychain::is_unavailable(&error) => return Err(error),
                 Err(error) => {
                     // Never silently replace an identity: keep the unreadable file for inspection.
                     tracing::error!(%error, "agent identity unreadable; creating a new identity (all devices must pair again)");
@@ -72,7 +76,7 @@ impl AgentIdentity {
     }
 
     fn decode(wrapped: &[u8]) -> anyhow::Result<AgentIdentity> {
-        let plain = Zeroizing::new(dpapi::unprotect(wrapped, PURPOSE)?);
+        let plain = Zeroizing::new(keychain::unprotect(wrapped, PURPOSE)?);
         let stored: StoredIdentity = serde_json::from_slice(&plain)?;
         anyhow::ensure!(stored.version == 1, "unsupported identity version");
         let der = Zeroizing::new(
@@ -100,7 +104,7 @@ impl AgentIdentity {
             created_at: self.created_at,
         };
         let plain = Zeroizing::new(serde_json::to_vec(&stored)?);
-        let wrapped = dpapi::protect(&plain, PURPOSE)?;
+        let wrapped = keychain::protect(&plain, PURPOSE)?;
         paths::write_atomic(&paths::data_dir().join("identity.bin"), &wrapped)?;
         Ok(())
     }

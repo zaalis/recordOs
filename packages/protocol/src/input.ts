@@ -1,9 +1,9 @@
 /**
- * Binary input protocol (iPad → PC). Little-endian, fixed layouts, 4-byte header:
+ * Binary input protocol (iPad → Mac). Little-endian, fixed layouts, 4-byte header:
  *   u8 kind | u8 flags | u16 seq
  * Coordinates are normalized to the streamed display: 0.0 = left/top, 1.0 = right/bottom.
  * The agent validates every field (length, finiteness, ranges, key allowlist) before injection.
- * Mirror: agent/crates/vp-core/src/input.rs
+ * Mirror: agent/crates/vp-agent/src/input.rs
  */
 import { LIMITS } from './constants.ts';
 
@@ -18,6 +18,8 @@ export const InputKind = {
   Touch: 0x08,
   Combo: 0x09,
   ReleaseAll: 0x0a,
+  /** Pinch forwarded as a native macOS magnify gesture. */
+  Magnify: 0x0b,
   /** Agent → client, realtime channel. */
   Cursor: 0x40,
 } as const;
@@ -29,6 +31,8 @@ export const PenPhase = { Hover: 0, Down: 1, Move: 2, Up: 3, Leave: 4, Cancel: 5
 export const TouchPhase = { Down: 1, Move: 2, Up: 3, Cancel: 5 } as const;
 
 export const PenButtons = { Barrel: 1, Eraser: 2 } as const;
+
+export const GesturePhase = { Begin: 0, Change: 1, End: 2 } as const;
 
 export const WheelFlags = { Precise: 1 } as const;
 
@@ -94,7 +98,10 @@ export class InputEncoder {
     return buf;
   }
 
-  /** Wheel deltas in Windows wheel units (120 = one notch). Positive dy scrolls content down. */
+  /**
+   * Wheel deltas in wheel units (120 = one mouse-wheel notch). Positive dy scrolls toward the end
+   * of the document. `precise` deltas become pixel scrolling on the Mac, others line scrolling.
+   */
   wheel(dx: number, dy: number, x: number | null, y: number | null, precise = true): ArrayBuffer {
     const buf = new ArrayBuffer(20);
     const view = new DataView(buf);
@@ -168,6 +175,21 @@ export class InputEncoder {
     this.header(view, InputKind.Combo);
     view.setUint8(4, keys.length);
     keys.forEach((vk, i) => view.setUint16(6 + i * 2, vk, true));
+    return buf;
+  }
+
+  /**
+   * Magnify gesture. `delta` is incremental (0.05 = 5% larger than the previous event), like
+   * NSEvent.magnification. Pass `x`/`y` as `null` to use the current pointer position.
+   */
+  magnify(phase: number, delta: number, x: number | null, y: number | null): ArrayBuffer {
+    const buf = new ArrayBuffer(20);
+    const view = new DataView(buf);
+    this.header(view, InputKind.Magnify);
+    view.setUint8(4, phase);
+    view.setFloat32(8, Number.isFinite(delta) ? Math.max(-4, Math.min(4, delta)) : 0, true);
+    view.setFloat32(12, x === null ? NaN : clamp01(x), true);
+    view.setFloat32(16, y === null ? NaN : clamp01(y), true);
     return buf;
   }
 

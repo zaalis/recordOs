@@ -82,7 +82,7 @@ export function AddComputerSheet({ open, onClose }: { open: boolean; onClose: ()
           </Button>
         </>
       ) : (
-        <p className="vp-caption">Open this app from the address shown on your PC to add it.</p>
+        <p className="vp-caption">Open this app from the address shown on your Mac to add it.</p>
       )}
       <div style={{ marginTop: 26, display: 'flex', flexDirection: 'column', gap: 10 }}>
         <div className="vp-overline">Another computer</div>

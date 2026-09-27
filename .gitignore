@@ -3,11 +3,11 @@ dist/
 target/
 *.log
 .DS_Store
-Thumbs.db
+.AppleDouble/
 .env
 .env.*
 !.env.example
 server/data/
 coverage/
-*.pdb
+*.dSYM/
 

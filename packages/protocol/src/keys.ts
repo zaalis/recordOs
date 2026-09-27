@@ -1,6 +1,10 @@
 /**
- * Windows virtual-key codes addressable from the iPad. Only keys in this table can be injected;
- * the agent enforces the same allowlist. 0x100 marks an extended key (e.g. numpad Enter).
+ * Keys addressable from the iPad. Only keys in this table can be injected; the Mac agent enforces
+ * the same allowlist and translates every code to the physical macOS key
+ * (agent/crates/vp-agent/src/platform/keymap.rs). The numeric values are stable wire identifiers;
+ * 0x100 marks the keypad variant of a key (keypad Enter, keypad ÷).
+ *
+ * Modifiers use Mac names: Cmd ⌘, Option ⌥, Control ⌃, Shift ⇧.
  */
 
 export const EXTENDED = 0x100;
@@ -10,8 +14,8 @@ export const VK = {
   Tab: 0x09,
   Enter: 0x0d,
   Shift: 0x10,
-  Ctrl: 0x11,
-  Alt: 0x12,
+  Control: 0x11,
+  Option: 0x12,
   Pause: 0x13,
   CapsLock: 0x14,
   Esc: 0x1b,
@@ -30,7 +34,7 @@ export const VK = {
   '0': 0x30, '1': 0x31, '2': 0x32, '3': 0x33, '4': 0x34, '5': 0x35, '6': 0x36, '7': 0x37, '8': 0x38, '9': 0x39,
   A: 0x41, B: 0x42, C: 0x43, D: 0x44, E: 0x45, F: 0x46, G: 0x47, H: 0x48, I: 0x49, J: 0x4a, K: 0x4b, L: 0x4c, M: 0x4d,
   N: 0x4e, O: 0x4f, P: 0x50, Q: 0x51, R: 0x52, S: 0x53, T: 0x54, U: 0x55, V: 0x56, W: 0x57, X: 0x58, Y: 0x59, Z: 0x5a,
-  Win: 0x5b,
+  Cmd: 0x5b,
   Menu: 0x5d,
   Num0: 0x60, Num1: 0x61, Num2: 0x62, Num3: 0x63, Num4: 0x64, Num5: 0x65, Num6: 0x66, Num7: 0x67, Num8: 0x68, Num9: 0x69,
   NumMultiply: 0x6a,
@@ -68,26 +72,31 @@ export type KeyName = keyof typeof VK;
 
 export const ALLOWED_VKS: ReadonlySet<number> = new Set(Object.values(VK));
 
-export const MODIFIER_KEYS: readonly KeyName[] = ['Ctrl', 'Alt', 'Shift', 'Win'];
+export const MODIFIER_KEYS: readonly KeyName[] = ['Cmd', 'Option', 'Control', 'Shift'];
 
 /** Short labels used on key caps. */
 export const KEY_LABEL: Partial<Record<KeyName, string>> = {
-  Ctrl: 'Ctrl',
-  Alt: 'Alt',
+  Cmd: '⌘',
+  Option: '⌥',
+  Control: '⌃',
   Shift: '⇧',
-  Win: '⊞',
-  Tab: 'Tab',
-  Esc: 'Esc',
-  Enter: '↵',
+  CapsLock: '⇪',
+  Tab: '⇥',
+  Esc: 'esc',
+  Enter: '↩',
   Backspace: '⌫',
-  Delete: 'Del',
-  Space: 'Space',
+  Delete: '⌦',
+  Space: 'Espace',
   Up: '↑',
   Down: '↓',
   Left: '←',
   Right: '→',
-  PageUp: 'PgUp',
-  PageDown: 'PgDn',
+  Home: '↖',
+  End: '↘',
+  PageUp: '⇞',
+  PageDown: '⇟',
+  Insert: 'Aide',
+  Menu: 'Menu',
   BracketLeft: '[',
   BracketRight: ']',
   Semicolon: ';',
@@ -104,8 +113,9 @@ export const KEY_LABEL: Partial<Record<KeyName, string>> = {
   NumMultiply: 'Num ×',
   NumDivide: 'Num ÷',
   NumDecimal: 'Num .',
-  NumEnter: 'Num ↵',
-  PrintScreen: 'PrtSc',
+  NumEnter: 'Num ↩',
+  NumLock: 'Clear',
+  PrintScreen: 'F13',
 };
 
 export function keyLabel(name: KeyName): string {
@@ -115,18 +125,24 @@ export function keyLabel(name: KeyName): string {
   return name;
 }
 
+/** Mac-style shortcut label, modifiers in Apple's canonical order: ⌃⌥⇧⌘K. */
 export function comboLabel(keys: readonly KeyName[]): string {
-  return keys.map(keyLabel).join(' + ');
+  const order: KeyName[] = ['Control', 'Option', 'Shift', 'Cmd'];
+  const modifiers = order.filter((key) => keys.includes(key));
+  const others = keys.filter((key) => !order.includes(key));
+  const glyphs = modifiers.map(keyLabel).join('');
+  const rest = others.map(keyLabel).join(' ');
+  return glyphs && rest ? `${glyphs}${rest.length > 1 ? ' ' : ''}${rest}` : glyphs || rest;
 }
 
 /** KeyboardEvent.code → key name, for hardware keyboards attached to the iPad. */
 export const DOM_CODE_TO_KEY: Record<string, KeyName> = (() => {
   const map: Record<string, KeyName> = {
     Backspace: 'Backspace', Tab: 'Tab', Enter: 'Enter', ShiftLeft: 'Shift', ShiftRight: 'Shift',
-    ControlLeft: 'Ctrl', ControlRight: 'Ctrl', AltLeft: 'Alt', AltRight: 'Alt', Pause: 'Pause',
+    ControlLeft: 'Control', ControlRight: 'Control', AltLeft: 'Option', AltRight: 'Option', Pause: 'Pause',
     CapsLock: 'CapsLock', Escape: 'Esc', Space: 'Space', PageUp: 'PageUp', PageDown: 'PageDown',
     End: 'End', Home: 'Home', ArrowLeft: 'Left', ArrowUp: 'Up', ArrowRight: 'Right', ArrowDown: 'Down',
-    PrintScreen: 'PrintScreen', Insert: 'Insert', Delete: 'Delete', MetaLeft: 'Win', MetaRight: 'Win',
+    PrintScreen: 'PrintScreen', Insert: 'Insert', Delete: 'Delete', MetaLeft: 'Cmd', MetaRight: 'Cmd',
     ContextMenu: 'Menu', NumpadMultiply: 'NumMultiply', NumpadAdd: 'NumAdd', NumpadSubtract: 'NumSubtract',
     NumpadDecimal: 'NumDecimal', NumpadDivide: 'NumDivide', NumpadEnter: 'NumEnter', NumLock: 'NumLock',
     ScrollLock: 'ScrollLock', Semicolon: 'Semicolon', Equal: 'Equal', Comma: 'Comma', Minus: 'Minus',

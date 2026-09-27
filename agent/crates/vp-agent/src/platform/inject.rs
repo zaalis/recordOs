@@ -1,37 +1,22 @@
-//! Input injection on a dedicated thread: SendInput for mouse/keyboard, synthetic pointer devices
-//! for Windows Ink pen (pressure, tilt, rotation, eraser, barrel) and multi-touch.
-//! Every held key, button, pen and touch contact is tracked and released when a session ends.
+//! Input injection on a dedicated thread with Quartz Event Services: mouse (with real drags,
+//! double-clicks and deltas), keyboard with explicit modifier flags, pixel-precise scrolling,
+//! Unicode text, media keys, a native tablet pen (pressure, tilt, rotation, eraser) for the
+//! Apple Pencil, and trackpad-style magnify for pinch.
+//!
+//! Every held key, button and pen contact is tracked and released when a session ends.
+//! Injection requires the Accessibility permission (System Settings → Privacy & Security).
 
+use super::display::Rect;
+use super::ffi;
+use super::keymap::{self, MacKey};
 use crate::input::{
-    InputEvent, MouseButton, PenPhase, PenSample, TouchContact, TouchPhase, EXTENDED,
+    GesturePhase, InputEvent, MouseButton, PenPhase, PenSample, TouchContact, TouchPhase,
 };
 use crossbeam_channel::{Receiver, Sender};
 use parking_lot::RwLock;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
-use windows::Win32::Foundation::{POINT, RECT};
-use windows::Win32::UI::Controls::{
-    CreateSyntheticPointerDevice, DestroySyntheticPointerDevice, HSYNTHETICPOINTERDEVICE,
-    POINTER_FEEDBACK_DEFAULT, POINTER_FEEDBACK_INDIRECT, POINTER_TYPE_INFO, POINTER_TYPE_INFO_0,
-};
-use windows::Win32::UI::Input::KeyboardAndMouse::{
-    MapVirtualKeyW, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT,
-    KEYBD_EVENT_FLAGS, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MAPVK_VK_TO_VSC,
-    MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
-    MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN,
-    MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN,
-    MOUSEEVENTF_XUP, MOUSEINPUT, MOUSE_EVENT_FLAGS, VIRTUAL_KEY,
-};
-use windows::Win32::UI::Input::Pointer::{
-    InjectSyntheticPointerInput, POINTER_FLAGS, POINTER_FLAG_CANCELED, POINTER_FLAG_DOWN,
-    POINTER_FLAG_FIRSTBUTTON, POINTER_FLAG_INCONTACT, POINTER_FLAG_INRANGE, POINTER_FLAG_PRIMARY,
-    POINTER_FLAG_UP, POINTER_FLAG_UPDATE, POINTER_INFO, POINTER_PEN_INFO, POINTER_TOUCH_INFO,
-};
-use windows::Win32::UI::WindowsAndMessaging::{
-    GetCursorPos, PEN_FLAG_BARREL, PEN_FLAG_ERASER, PEN_FLAG_INVERTED, PEN_MASK_PRESSURE,
-    PEN_MASK_ROTATION, PEN_MASK_TILT_X, PEN_MASK_TILT_Y, PT_PEN, PT_TOUCH, TOUCH_MASK_CONTACTAREA,
-    TOUCH_MASK_PRESSURE, XBUTTON1, XBUTTON2,
-};
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy)]
 pub struct InputPolicy {
@@ -48,8 +33,8 @@ pub enum InjectCommand {
     Stop,
 }
 
-/// Target display rectangle in virtual-desktop physical pixels (updated when the display changes).
-pub type SharedRect = Arc<RwLock<RECT>>;
+/// Target display in global points (updated when the streamed display changes).
+pub type SharedRect = Arc<RwLock<Rect>>;
 
 pub struct InjectorHandle {
     pub sender: Sender<InjectCommand>,
@@ -62,6 +47,9 @@ impl InjectorHandle {
         let thread = std::thread::Builder::new()
             .name("vp-input".into())
             .spawn(move || {
+                if !super::permissions::accessibility_allowed() {
+                    tracing::warn!("Accessibility permission is missing: macOS will ignore injected input until Vision-Pro is allowed in System Settings → Privacy & Security → Accessibility");
+                }
                 let mut injector = Injector::new(display, policy);
                 injector.run(receiver);
             })
@@ -82,67 +70,75 @@ impl Drop for InjectorHandle {
     }
 }
 
+const BUTTON_LEFT: i32 = 0;
+const BUTTON_RIGHT: i32 = 1;
+
+fn button_id(button: MouseButton) -> i32 {
+    match button {
+        MouseButton::Left => 0,
+        MouseButton::Right => 1,
+        MouseButton::Middle => 2,
+        MouseButton::Back => 3,
+        MouseButton::Forward => 4,
+    }
+}
+
+/// Wheel units from the iPad (120 = one notch, like a mouse wheel) → macOS pixels.
+const PIXELS_PER_WHEEL_UNIT: f32 = 0.6;
+
+/// Recognises double and triple clicks the way AppKit does: same button, within the system
+/// double-click interval, and within a few points of the previous click.
+struct ClickTracker {
+    interval: Duration,
+    last: Option<(i32, Instant, f64, f64, i32)>,
+}
+
+impl ClickTracker {
+    fn new() -> ClickTracker {
+        let seconds = unsafe { ffi::vp_double_click_interval() };
+        ClickTracker {
+            interval: Duration::from_secs_f64(seconds.clamp(0.15, 5.0)),
+            last: None,
+        }
+    }
+
+    fn press(&mut self, button: i32, x: f64, y: f64) -> i32 {
+        let count = match self.last {
+            Some((last_button, at, lx, ly, n))
+                if last_button == button
+                    && at.elapsed() <= self.interval
+                    && (x - lx).abs() <= 4.0
+                    && (y - ly).abs() <= 4.0 =>
+            {
+                n + 1
+            }
+            _ => 1,
+        };
+        self.last = Some((button, Instant::now(), x, y, count));
+        count
+    }
+}
+
 struct Injector {
     display: SharedRect,
     policy: InputPolicy,
     held_keys: HashSet<u16>,
-    held_buttons: HashSet<u8>,
-    pen_device: Option<HSYNTHETICPOINTERDEVICE>,
+    /// Held modifier flags keyed by the Vision-Pro key that pressed them.
+    modifiers: HashMap<u16, u64>,
+    caps_lock: bool,
+    /// Held mouse buttons → click count used for the matching "up".
+    held_buttons: BTreeMap<i32, i32>,
+    clicks: ClickTracker,
     pen_in_range: bool,
     pen_in_contact: bool,
+    pen_eraser: bool,
+    pen_button: i32,
     pen_last: Option<PenSample>,
-    touch_device: Option<HSYNTHETICPOINTERDEVICE>,
-    touches: BTreeMap<u8, TouchContact>,
+    touch_primary: Option<u8>,
     wheel_accum: (f32, f32),
     rel_accum: (f64, f64),
-}
-
-fn mouse_input(dx: i32, dy: i32, data: u32, flags: MOUSE_EVENT_FLAGS) -> INPUT {
-    INPUT {
-        r#type: INPUT_MOUSE,
-        Anonymous: INPUT_0 {
-            mi: MOUSEINPUT {
-                dx,
-                dy,
-                mouseData: data,
-                dwFlags: flags,
-                time: 0,
-                dwExtraInfo: 0,
-            },
-        },
-    }
-}
-
-fn key_input(vk: u16, scan: u16, flags: KEYBD_EVENT_FLAGS) -> INPUT {
-    INPUT {
-        r#type: INPUT_KEYBOARD,
-        Anonymous: INPUT_0 {
-            ki: KEYBDINPUT {
-                wVk: VIRTUAL_KEY(vk),
-                wScan: scan,
-                dwFlags: flags,
-                time: 0,
-                dwExtraInfo: 0,
-            },
-        },
-    }
-}
-
-fn send(inputs: &[INPUT]) {
-    if inputs.is_empty() {
-        return;
-    }
-    unsafe {
-        SendInput(inputs, std::mem::size_of::<INPUT>() as i32);
-    }
-}
-
-fn is_extended_vk(vk: u16) -> bool {
-    vk & EXTENDED != 0
-        || matches!(
-            vk & 0xff,
-            0x21..=0x28 | 0x2d | 0x2e | 0x5b | 0x5c | 0x5d | 0x6f | 0xa3 | 0xa5 | 0x90 | 0x2c
-        )
+    magnifying: bool,
+    last_point: (f64, f64),
 }
 
 impl Injector {
@@ -151,15 +147,20 @@ impl Injector {
             display,
             policy,
             held_keys: HashSet::new(),
-            held_buttons: HashSet::new(),
-            pen_device: None,
+            modifiers: HashMap::new(),
+            caps_lock: false,
+            held_buttons: BTreeMap::new(),
+            clicks: ClickTracker::new(),
             pen_in_range: false,
             pen_in_contact: false,
+            pen_eraser: false,
+            pen_button: BUTTON_LEFT,
             pen_last: None,
-            touch_device: None,
-            touches: BTreeMap::new(),
+            touch_primary: None,
             wheel_accum: (0.0, 0.0),
             rel_accum: (0.0, 0.0),
+            magnifying: false,
+            last_point: (0.0, 0.0),
         }
     }
 
@@ -167,123 +168,156 @@ impl Injector {
         while let Ok(command) = receiver.recv() {
             match command {
                 InjectCommand::Event(event) => self.handle(event),
-                InjectCommand::Policy(policy) => {
-                    self.policy = policy;
-                }
+                InjectCommand::Policy(policy) => self.policy = policy,
                 InjectCommand::Stop => break,
             }
         }
         self.release_all();
-        unsafe {
-            if let Some(device) = self.pen_device.take() {
-                DestroySyntheticPointerDevice(device);
-            }
-            if let Some(device) = self.touch_device.take() {
-                DestroySyntheticPointerDevice(device);
-            }
-        }
     }
 
-    fn to_screen(&self, x: f32, y: f32) -> POINT {
+    fn flags(&self) -> u64 {
+        let mut flags = self.modifiers.values().fold(0, |acc, flag| acc | flag);
+        if self.caps_lock {
+            flags |= keymap::FLAG_ALPHA_SHIFT;
+        }
+        flags
+    }
+
+    /// Lowest held button, so pointer moves become the matching drag events.
+    fn held_button(&self) -> i32 {
+        if self.pen_in_contact {
+            return self.pen_button;
+        }
+        self.held_buttons.keys().next().copied().unwrap_or(-1)
+    }
+
+    /// Normalised (0..1) position on the streamed display → global points.
+    fn to_screen(&self, x: f32, y: f32) -> (f64, f64) {
         let rect = *self.display.read();
-        let w = (rect.right - rect.left).max(1) as f32;
-        let h = (rect.bottom - rect.top).max(1) as f32;
-        POINT {
-            x: rect.left + ((x * (w - 1.0)).round() as i32).clamp(0, w as i32 - 1),
-            y: rect.top + ((y * (h - 1.0)).round() as i32).clamp(0, h as i32 - 1),
-        }
+        let px = rect.x + (x as f64 * rect.width).clamp(0.0, (rect.width - 0.5).max(0.0));
+        let py = rect.y + (y as f64 * rect.height).clamp(0.0, (rect.height - 0.5).max(0.0));
+        (px, py)
     }
 
-    fn absolute_move(&self, point: POINT) -> INPUT {
-        let desktop = super::gpu::virtual_desktop();
-        let vw = (desktop.right - desktop.left).max(2) as i64;
-        let vh = (desktop.bottom - desktop.top).max(2) as i64;
-        let nx = ((point.x - desktop.left) as i64 * 65535 / (vw - 1)) as i32;
-        let ny = ((point.y - desktop.top) as i64 * 65535 / (vh - 1)) as i32;
-        mouse_input(
-            nx,
-            ny,
-            0,
-            MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
-        )
+    fn move_to(&mut self, point: (f64, f64)) {
+        self.last_point = point;
+        unsafe { ffi::vp_mouse_move(point.0, point.1, self.held_button(), self.flags()) }
+    }
+
+    fn cursor(&self) -> (f64, f64) {
+        let (mut x, mut y) = self.last_point;
+        unsafe {
+            ffi::vp_cursor_location(&mut x, &mut y);
+        }
+        (x, y)
     }
 
     fn handle(&mut self, event: InputEvent) {
         match event {
             InputEvent::MoveAbs { x, y } if self.policy.mouse => {
                 let point = self.to_screen(x, y);
-                send(&[self.absolute_move(point)]);
+                self.move_to(point);
             }
             InputEvent::MoveRel { dx, dy } if self.policy.mouse => {
                 let rect = *self.display.read();
-                self.rel_accum.0 += dx as f64 * (rect.right - rect.left) as f64;
-                self.rel_accum.1 += dy as f64 * (rect.bottom - rect.top) as f64;
-                let (ix, iy) = (
-                    self.rel_accum.0.trunc() as i32,
-                    self.rel_accum.1.trunc() as i32,
-                );
-                if ix == 0 && iy == 0 {
+                self.rel_accum.0 += dx as f64 * rect.width;
+                self.rel_accum.1 += dy as f64 * rect.height;
+                // Quartz coordinates are fractional points: move in quarter-point steps.
+                let step = |v: f64| (v * 4.0).trunc() / 4.0;
+                let (sx, sy) = (step(self.rel_accum.0), step(self.rel_accum.1));
+                if sx == 0.0 && sy == 0.0 {
                     return;
                 }
-                self.rel_accum.0 -= ix as f64;
-                self.rel_accum.1 -= iy as f64;
-                let mut current = POINT::default();
-                unsafe {
-                    let _ = GetCursorPos(&mut current);
-                }
-                let target = POINT {
-                    x: (current.x + ix).clamp(rect.left, rect.right - 1),
-                    y: (current.y + iy).clamp(rect.top, rect.bottom - 1),
-                };
-                send(&[self.absolute_move(target)]);
+                self.rel_accum.0 -= sx;
+                self.rel_accum.1 -= sy;
+                let (cx, cy) = self.cursor();
+                let target = (
+                    (cx + sx).clamp(rect.x, (rect.right() - 0.5).max(rect.x)),
+                    (cy + sy).clamp(rect.y, (rect.bottom() - 0.5).max(rect.y)),
+                );
+                self.move_to(target);
             }
             InputEvent::Button { button, down, at } if self.policy.mouse => {
-                let mut inputs = Vec::with_capacity(2);
                 if let Some((x, y)) = at {
-                    inputs.push(self.absolute_move(self.to_screen(x, y)));
+                    let point = self.to_screen(x, y);
+                    self.move_to(point);
                 }
-                let (flags, data) = match (button, down) {
-                    (MouseButton::Left, true) => (MOUSEEVENTF_LEFTDOWN, 0),
-                    (MouseButton::Left, false) => (MOUSEEVENTF_LEFTUP, 0),
-                    (MouseButton::Right, true) => (MOUSEEVENTF_RIGHTDOWN, 0),
-                    (MouseButton::Right, false) => (MOUSEEVENTF_RIGHTUP, 0),
-                    (MouseButton::Middle, true) => (MOUSEEVENTF_MIDDLEDOWN, 0),
-                    (MouseButton::Middle, false) => (MOUSEEVENTF_MIDDLEUP, 0),
-                    (MouseButton::Back, true) => (MOUSEEVENTF_XDOWN, XBUTTON1 as u32),
-                    (MouseButton::Back, false) => (MOUSEEVENTF_XUP, XBUTTON1 as u32),
-                    (MouseButton::Forward, true) => (MOUSEEVENTF_XDOWN, XBUTTON2 as u32),
-                    (MouseButton::Forward, false) => (MOUSEEVENTF_XUP, XBUTTON2 as u32),
+                let id = button_id(button);
+                let point = if at.is_some() {
+                    self.last_point
+                } else {
+                    self.cursor()
                 };
-                let id = button as u8;
-                if down {
-                    self.held_buttons.insert(id);
-                } else if !self.held_buttons.remove(&id) {
+                let clicks = if down {
+                    let clicks = self.clicks.press(id, point.0, point.1);
+                    self.held_buttons.insert(id, clicks);
+                    clicks
+                } else {
                     // Never send an "up" for a button this session did not press.
-                    send(&inputs);
-                    return;
-                }
-                inputs.push(mouse_input(0, 0, data, flags));
-                send(&inputs);
+                    let Some(clicks) = self.held_buttons.remove(&id) else {
+                        return;
+                    };
+                    clicks
+                };
+                self.last_point = point;
+                unsafe { ffi::vp_mouse_button(point.0, point.1, id, down, clicks, self.flags()) }
             }
-            InputEvent::Wheel { dx, dy, at } if self.policy.mouse => {
-                let mut inputs = Vec::with_capacity(3);
+            InputEvent::Wheel {
+                dx,
+                dy,
+                precise,
+                at,
+            } if self.policy.mouse => {
                 if let Some((x, y)) = at {
-                    inputs.push(self.absolute_move(self.to_screen(x, y)));
+                    let point = self.to_screen(x, y);
+                    self.move_to(point);
                 }
-                self.wheel_accum.0 += dx;
-                self.wheel_accum.1 += dy;
-                let vertical = self.wheel_accum.1.trunc() as i32;
-                let horizontal = self.wheel_accum.0.trunc() as i32;
-                if vertical != 0 {
-                    self.wheel_accum.1 -= vertical as f32;
-                    // Positive dy scrolls content down, which is a negative wheel delta on Windows.
-                    inputs.push(mouse_input(0, 0, (-vertical) as u32, MOUSEEVENTF_WHEEL));
+                // Positive dy scrolls toward the end of the document; macOS expresses that as a
+                // negative wheel value (positive = toward the top / left).
+                let (vertical, horizontal) = if precise {
+                    self.wheel_accum.0 += -dy * PIXELS_PER_WHEEL_UNIT;
+                    self.wheel_accum.1 += -dx * PIXELS_PER_WHEEL_UNIT;
+                    (self.wheel_accum.0.trunc(), self.wheel_accum.1.trunc())
+                } else {
+                    self.wheel_accum.0 += -dy / 120.0;
+                    self.wheel_accum.1 += -dx / 120.0;
+                    (self.wheel_accum.0.trunc(), self.wheel_accum.1.trunc())
+                };
+                self.wheel_accum.0 -= vertical;
+                self.wheel_accum.1 -= horizontal;
+                if vertical != 0.0 || horizontal != 0.0 {
+                    unsafe {
+                        ffi::vp_scroll(vertical as i32, horizontal as i32, !precise, self.flags())
+                    }
                 }
-                if horizontal != 0 {
-                    self.wheel_accum.0 -= horizontal as f32;
-                    inputs.push(mouse_input(0, 0, horizontal as u32, MOUSEEVENTF_HWHEEL));
+            }
+            InputEvent::Magnify { phase, delta, at } if self.policy.mouse => {
+                if let Some((x, y)) = at {
+                    let point = self.to_screen(x, y);
+                    if phase == GesturePhase::Begin {
+                        // Gestures are delivered to the window under the pointer.
+                        self.move_to(point);
+                    }
+                    self.last_point = point;
                 }
-                send(&inputs);
+                let point = self.last_point;
+                match phase {
+                    GesturePhase::Begin => {
+                        if self.magnifying {
+                            unsafe { ffi::vp_magnify(2, 0.0, point.0, point.1) }
+                        }
+                        self.magnifying = true;
+                        unsafe { ffi::vp_magnify(0, 0.0, point.0, point.1) }
+                    }
+                    GesturePhase::Change if self.magnifying => unsafe {
+                        ffi::vp_magnify(1, delta as f64, point.0, point.1)
+                    },
+                    GesturePhase::End if self.magnifying => {
+                        self.magnifying = false;
+                        unsafe { ffi::vp_magnify(2, 0.0, point.0, point.1) }
+                    }
+                    _ => {}
+                }
             }
             InputEvent::Key { vk, down } if self.policy.keyboard => {
                 if down {
@@ -291,36 +325,22 @@ impl Injector {
                 } else if !self.held_keys.remove(&vk) {
                     return;
                 }
-                send(&[self.key(vk, down)]);
+                self.key(vk, down);
             }
             InputEvent::Combo(keys) if self.policy.keyboard => {
-                let mut inputs = vec![];
                 let pressed: Vec<u16> = keys
                     .iter()
                     .copied()
                     .filter(|vk| !self.held_keys.contains(vk))
                     .collect();
                 for vk in &pressed {
-                    inputs.push(self.key(*vk, true));
+                    self.key(*vk, true);
                 }
                 for vk in pressed.iter().rev() {
-                    inputs.push(self.key(*vk, false));
+                    self.key(*vk, false);
                 }
-                send(&inputs);
             }
-            InputEvent::Text(units) if self.policy.keyboard => {
-                let mut inputs = Vec::with_capacity(units.len() * 2);
-                for unit in units {
-                    if unit == 0x0a {
-                        inputs.push(self.key(0x0d, true));
-                        inputs.push(self.key(0x0d, false));
-                    } else {
-                        inputs.push(key_input(0, unit, KEYEVENTF_UNICODE));
-                        inputs.push(key_input(0, unit, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP));
-                    }
-                }
-                send(&inputs);
-            }
+            InputEvent::Text(units) if self.policy.keyboard => self.text(&units),
             InputEvent::Pen(sample) if self.policy.pen => {
                 if self.policy.pen_as_mouse {
                     self.pen_as_mouse(sample);
@@ -334,17 +354,52 @@ impl Injector {
         }
     }
 
-    fn key(&self, vk: u16, down: bool) -> INPUT {
-        let base = vk & 0xff;
-        let scan = unsafe { MapVirtualKeyW(base as u32, MAPVK_VK_TO_VSC) } as u16;
-        let mut flags = KEYBD_EVENT_FLAGS(0);
-        if is_extended_vk(vk) {
-            flags |= KEYEVENTF_EXTENDEDKEY;
+    fn key(&mut self, vk: u16, down: bool) {
+        let Some(mac) = keymap::translate(vk) else {
+            return;
+        };
+        match mac {
+            MacKey::Modifier { code, flag } => {
+                if down {
+                    self.modifiers.insert(vk, keymap::modifier_mask(flag));
+                } else {
+                    self.modifiers.remove(&vk);
+                }
+                unsafe { ffi::vp_key(code, down, self.flags(), true) }
+            }
+            MacKey::Key { code, flags } => unsafe {
+                ffi::vp_key(code, down, self.flags() | flags, false)
+            },
+            MacKey::CapsLock => {
+                if down {
+                    self.caps_lock = !self.caps_lock;
+                }
+                unsafe { ffi::vp_key(0x39, down, self.flags(), true) }
+            }
+            MacKey::Media(key) => unsafe { ffi::vp_media_key(key, down) },
         }
-        if !down {
-            flags |= KEYEVENTF_KEYUP;
+    }
+
+    fn text(&mut self, units: &[u16]) {
+        let mut run: Vec<u16> = Vec::with_capacity(units.len());
+        let flush = |run: &mut Vec<u16>| {
+            if !run.is_empty() {
+                unsafe { ffi::vp_text(run.as_ptr(), run.len()) }
+                run.clear();
+            }
+        };
+        for &unit in units {
+            if unit == 0x0a {
+                flush(&mut run);
+                unsafe {
+                    ffi::vp_key(keymap::KEY_RETURN, true, 0, false);
+                    ffi::vp_key(keymap::KEY_RETURN, false, 0, false);
+                }
+            } else {
+                run.push(unit);
+            }
         }
-        key_input(base, scan, flags)
+        flush(&mut run);
     }
 
     fn pen_as_mouse(&mut self, sample: PenSample) {
@@ -365,265 +420,161 @@ impl Injector {
                 at,
             }),
             PenPhase::Up | PenPhase::Cancel => {
-                self.handle(InputEvent::Button {
-                    button: MouseButton::Left,
-                    down: false,
-                    at,
-                });
-                self.handle(InputEvent::Button {
-                    button: MouseButton::Right,
-                    down: false,
-                    at,
-                });
+                for button in [MouseButton::Left, MouseButton::Right] {
+                    self.handle(InputEvent::Button {
+                        button,
+                        down: false,
+                        at,
+                    });
+                }
             }
             PenPhase::Leave => {}
         }
     }
 
+    /// Announces the stylus to macOS (pen or eraser end) before it is used.
+    fn pen_proximity(&mut self, eraser: bool) {
+        if self.pen_in_range && self.pen_eraser == eraser {
+            return;
+        }
+        if self.pen_in_range {
+            unsafe { ffi::vp_tablet_proximity(false, self.pen_eraser) }
+        }
+        unsafe { ffi::vp_tablet_proximity(true, eraser) }
+        self.pen_in_range = true;
+        self.pen_eraser = eraser;
+    }
+
     fn pen(&mut self, sample: PenSample) {
-        if self.pen_device.is_none() {
-            match unsafe { CreateSyntheticPointerDevice(PT_PEN, 1, POINTER_FEEDBACK_INDIRECT) } {
-                Ok(device) => self.pen_device = Some(device),
-                Err(error) => {
-                    tracing::warn!(%error, "pen injection unavailable; falling back to mouse");
-                    self.policy.pen_as_mouse = true;
-                    self.pen_as_mouse(sample);
-                    return;
-                }
-            }
-        }
-        // Windows expects the pen to be in range before contact.
-        if matches!(sample.phase, PenPhase::Down) && !self.pen_in_range {
-            self.inject_pen(PenSample {
-                phase: PenPhase::Hover,
-                pressure: 0.0,
-                ..sample
-            });
-        }
-        self.inject_pen(sample);
-    }
-
-    fn inject_pen(&mut self, sample: PenSample) {
-        let Some(device) = self.pen_device else {
-            return;
-        };
-        let flags = match sample.phase {
-            PenPhase::Hover => POINTER_FLAG_INRANGE | POINTER_FLAG_UPDATE,
-            PenPhase::Down => {
-                POINTER_FLAG_INRANGE
-                    | POINTER_FLAG_INCONTACT
-                    | POINTER_FLAG_DOWN
-                    | POINTER_FLAG_FIRSTBUTTON
-            }
-            PenPhase::Move if self.pen_in_contact => {
-                POINTER_FLAG_INRANGE
-                    | POINTER_FLAG_INCONTACT
-                    | POINTER_FLAG_UPDATE
-                    | POINTER_FLAG_FIRSTBUTTON
-            }
-            PenPhase::Move => POINTER_FLAG_INRANGE | POINTER_FLAG_UPDATE,
-            PenPhase::Up => POINTER_FLAG_INRANGE | POINTER_FLAG_UP,
-            PenPhase::Leave => POINTER_FLAG_UPDATE,
-            PenPhase::Cancel => POINTER_FLAG_UP | POINTER_FLAG_CANCELED,
-        };
-        if matches!(
-            sample.phase,
-            PenPhase::Up | PenPhase::Leave | PenPhase::Cancel
-        ) && !self.pen_in_range
-            && !self.pen_in_contact
-        {
-            return;
-        }
         let point = self.to_screen(sample.x, sample.y);
-        let mut pen_flags = 0;
-        if sample.barrel {
-            pen_flags |= PEN_FLAG_BARREL;
-        }
-        if sample.eraser {
-            pen_flags |= if matches!(sample.phase, PenPhase::Down | PenPhase::Move)
-                && self.pen_in_contact
-                || sample.phase == PenPhase::Down
-            {
-                PEN_FLAG_ERASER
-            } else {
-                PEN_FLAG_INVERTED
-            };
-        }
-        let info = POINTER_TYPE_INFO {
-            r#type: PT_PEN,
-            Anonymous: POINTER_TYPE_INFO_0 {
-                penInfo: POINTER_PEN_INFO {
-                    pointerInfo: POINTER_INFO {
-                        pointerType: PT_PEN,
-                        pointerFlags: flags | POINTER_FLAG_PRIMARY,
-                        ptPixelLocation: point,
-                        ..Default::default()
-                    },
-                    penFlags: pen_flags,
-                    penMask: PEN_MASK_PRESSURE
-                        | PEN_MASK_ROTATION
-                        | PEN_MASK_TILT_X
-                        | PEN_MASK_TILT_Y,
-                    pressure: (sample.pressure * 1024.0).round().clamp(0.0, 1024.0) as u32,
-                    rotation: sample.twist as u32,
-                    tiltX: sample.tilt_x as i32,
-                    tiltY: sample.tilt_y as i32,
-                },
-            },
+        // Tablet tilt is normalised to -1…1; the iPad sends degrees.
+        let tilt_x = (sample.tilt_x as f64 / 90.0).clamp(-1.0, 1.0);
+        let tilt_y = (sample.tilt_y as f64 / 90.0).clamp(-1.0, 1.0);
+        let rotation = sample.twist as f64;
+        let point_event = |phase: i32, button: i32, pressure: f32, flags: u64| unsafe {
+            ffi::vp_tablet_point(
+                point.0,
+                point.1,
+                phase,
+                button,
+                pressure as f64,
+                tilt_x,
+                tilt_y,
+                rotation,
+                flags,
+            )
         };
-        match unsafe { InjectSyntheticPointerInput(device, &[info]) } {
-            Ok(()) => {
-                match sample.phase {
-                    PenPhase::Hover | PenPhase::Move => self.pen_in_range = true,
-                    PenPhase::Down => {
-                        self.pen_in_range = true;
-                        self.pen_in_contact = true;
-                    }
-                    PenPhase::Up => self.pen_in_contact = false,
-                    PenPhase::Leave | PenPhase::Cancel => {
-                        self.pen_in_range = false;
-                        self.pen_in_contact = false;
-                    }
-                }
-                self.pen_last = Some(sample);
+        match sample.phase {
+            PenPhase::Hover => {
+                self.pen_proximity(sample.eraser);
+                point_event(0, BUTTON_LEFT, 0.0, self.flags());
             }
-            Err(error) => tracing::debug!(%error, "pen injection failed"),
+            PenPhase::Down => {
+                self.pen_proximity(sample.eraser);
+                if self.pen_in_contact {
+                    point_event(3, self.pen_button, 0.0, self.flags());
+                }
+                // The Pencil's squeeze/barrel gesture acts as the secondary (right) button.
+                self.pen_button = if sample.barrel {
+                    BUTTON_RIGHT
+                } else {
+                    BUTTON_LEFT
+                };
+                self.pen_in_contact = true;
+                point_event(1, self.pen_button, sample.pressure, self.flags());
+            }
+            PenPhase::Move => {
+                self.pen_proximity(sample.eraser);
+                if self.pen_in_contact {
+                    point_event(2, self.pen_button, sample.pressure, self.flags());
+                } else {
+                    point_event(0, BUTTON_LEFT, 0.0, self.flags());
+                }
+            }
+            PenPhase::Up => {
+                if self.pen_in_contact {
+                    self.pen_in_contact = false;
+                    point_event(3, self.pen_button, 0.0, self.flags());
+                }
+            }
+            PenPhase::Leave | PenPhase::Cancel => {
+                if self.pen_in_contact {
+                    self.pen_in_contact = false;
+                    point_event(3, self.pen_button, 0.0, self.flags());
+                }
+                if self.pen_in_range {
+                    self.pen_in_range = false;
+                    unsafe { ffi::vp_tablet_proximity(false, self.pen_eraser) }
+                }
+            }
         }
+        self.last_point = point;
+        self.pen_last = Some(sample);
     }
 
+    /// macOS has no touchscreen injection: the first finger drives the pointer like a mouse.
     fn touch(&mut self, contacts: Vec<TouchContact>) {
-        if self.touch_device.is_none() {
-            match unsafe {
-                CreateSyntheticPointerDevice(
-                    PT_TOUCH,
-                    crate::input::MAX_TOUCH_CONTACTS as u32,
-                    POINTER_FEEDBACK_DEFAULT,
-                )
-            } {
-                Ok(device) => self.touch_device = Some(device),
-                Err(error) => {
-                    tracing::warn!(%error, "touch injection unavailable");
-                    return;
-                }
-            }
-        }
-        let Some(device) = self.touch_device else {
-            return;
-        };
-        for contact in &contacts {
+        for contact in contacts {
+            let at = Some((contact.x, contact.y));
             match contact.phase {
-                TouchPhase::Down | TouchPhase::Move => {
-                    if contact.phase == TouchPhase::Move && !self.touches.contains_key(&contact.id)
-                    {
-                        continue;
-                    }
-                    self.touches.insert(contact.id, *contact);
+                TouchPhase::Down if self.touch_primary.is_none() => {
+                    self.touch_primary = Some(contact.id);
+                    self.handle(InputEvent::Button {
+                        button: MouseButton::Left,
+                        down: true,
+                        at,
+                    });
                 }
-                TouchPhase::Up | TouchPhase::Cancel => {
-                    if let Some(existing) = self.touches.get_mut(&contact.id) {
-                        *existing = *contact;
-                    }
+                TouchPhase::Move if self.touch_primary == Some(contact.id) => {
+                    self.handle(InputEvent::MoveAbs {
+                        x: contact.x,
+                        y: contact.y,
+                    });
                 }
+                TouchPhase::Up | TouchPhase::Cancel if self.touch_primary == Some(contact.id) => {
+                    self.touch_primary = None;
+                    self.handle(InputEvent::Button {
+                        button: MouseButton::Left,
+                        down: false,
+                        at,
+                    });
+                }
+                _ => {}
             }
-        }
-        let changed: HashSet<u8> = contacts.iter().map(|c| c.id).collect();
-        let primary = self.touches.keys().next().copied();
-        let frame: Vec<POINTER_TYPE_INFO> = self
-            .touches
-            .values()
-            .map(|contact| {
-                let point = self.to_screen(contact.x, contact.y);
-                let mut flags: POINTER_FLAGS = match contact.phase {
-                    TouchPhase::Down if changed.contains(&contact.id) => {
-                        POINTER_FLAG_DOWN | POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT
-                    }
-                    TouchPhase::Up => POINTER_FLAG_UP,
-                    TouchPhase::Cancel => POINTER_FLAG_UP | POINTER_FLAG_CANCELED,
-                    _ => POINTER_FLAG_UPDATE | POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT,
-                };
-                if Some(contact.id) == primary {
-                    flags |= POINTER_FLAG_PRIMARY;
-                }
-                POINTER_TYPE_INFO {
-                    r#type: PT_TOUCH,
-                    Anonymous: POINTER_TYPE_INFO_0 {
-                        touchInfo: POINTER_TOUCH_INFO {
-                            pointerInfo: POINTER_INFO {
-                                pointerType: PT_TOUCH,
-                                pointerId: contact.id as u32,
-                                pointerFlags: flags,
-                                ptPixelLocation: point,
-                                ..Default::default()
-                            },
-                            touchMask: TOUCH_MASK_CONTACTAREA | TOUCH_MASK_PRESSURE,
-                            rcContact: RECT {
-                                left: point.x - 4,
-                                top: point.y - 4,
-                                right: point.x + 4,
-                                bottom: point.y + 4,
-                            },
-                            pressure: (contact.pressure.max(0.3) * 1024.0) as u32,
-                            ..Default::default()
-                        },
-                    },
-                }
-            })
-            .collect();
-        if !frame.is_empty() {
-            if let Err(error) = unsafe { InjectSyntheticPointerInput(device, &frame) } {
-                tracing::debug!(%error, "touch injection failed");
-            }
-        }
-        // After a Down frame, the contact continues as Move; Up/Cancel contacts are removed.
-        self.touches
-            .retain(|_, c| !matches!(c.phase, TouchPhase::Up | TouchPhase::Cancel));
-        for contact in self.touches.values_mut() {
-            contact.phase = TouchPhase::Move;
         }
     }
 
     fn release_all(&mut self) {
-        let keys: Vec<u16> = self.held_keys.drain().collect();
-        let inputs: Vec<INPUT> = keys.iter().map(|vk| self.key(*vk, false)).collect();
-        send(&inputs);
-        let buttons: Vec<u8> = self.held_buttons.drain().collect();
-        for id in buttons {
-            let (flags, data) = match id {
-                0 => (MOUSEEVENTF_LEFTUP, 0),
-                1 => (MOUSEEVENTF_RIGHTUP, 0),
-                2 => (MOUSEEVENTF_MIDDLEUP, 0),
-                3 => (MOUSEEVENTF_XUP, XBUTTON1 as u32),
-                _ => (MOUSEEVENTF_XUP, XBUTTON2 as u32),
-            };
-            send(&[mouse_input(0, 0, data, flags)]);
+        if self.magnifying {
+            self.magnifying = false;
+            let point = self.last_point;
+            unsafe { ffi::vp_magnify(2, 0.0, point.0, point.1) }
         }
         if let Some(last) = self.pen_last {
-            if self.pen_in_contact {
-                self.inject_pen(PenSample {
-                    phase: PenPhase::Up,
-                    pressure: 0.0,
-                    ..last
-                });
-            }
-            if self.pen_in_range {
-                self.inject_pen(PenSample {
-                    phase: PenPhase::Leave,
+            if self.pen_in_contact || self.pen_in_range {
+                self.pen(PenSample {
+                    phase: PenPhase::Cancel,
                     pressure: 0.0,
                     ..last
                 });
             }
         }
-        if !self.touches.is_empty() {
-            let ups: Vec<TouchContact> = self
-                .touches
-                .values()
-                .map(|c| TouchContact {
-                    phase: TouchPhase::Cancel,
-                    ..*c
-                })
-                .collect();
-            self.touch(ups);
+        let point = self.cursor();
+        let buttons: Vec<(i32, i32)> = std::mem::take(&mut self.held_buttons).into_iter().collect();
+        for (id, clicks) in buttons {
+            unsafe { ffi::vp_mouse_button(point.0, point.1, id, false, clicks, self.flags()) }
         }
+        self.touch_primary = None;
+        // Regular keys first, then modifiers, so no stray shortcut fires on the way out.
+        let keys: Vec<u16> = self.held_keys.drain().collect();
+        let (modifiers, regular): (Vec<u16>, Vec<u16>) = keys
+            .into_iter()
+            .partition(|vk| matches!(keymap::translate(*vk), Some(MacKey::Modifier { .. })));
+        for vk in regular.into_iter().chain(modifiers) {
+            self.key(vk, false);
+        }
+        self.modifiers.clear();
         self.wheel_accum = (0.0, 0.0);
+        self.rel_accum = (0.0, 0.0);
     }
 }

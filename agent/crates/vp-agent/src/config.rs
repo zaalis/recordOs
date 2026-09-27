@@ -1,4 +1,4 @@
-//! Persistent agent settings (%APPDATA%\Vision-Pro\settings.json).
+//! Persistent agent settings (~/Library/Application Support/Vision-Pro/settings.json).
 //! Every field has a secure default; unknown fields are ignored and missing ones take defaults.
 
 use crate::paths;
@@ -151,7 +151,7 @@ impl Default for VideoSettings {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum EncoderPreference {
-    /// Hardware first (NVENC, Quick Sync, AMF via Media Foundation), software fallback.
+    /// Hardware first (VideoToolbox: Apple silicon media engine or Intel Quick Sync), software fallback.
     Auto,
     HardwareOnly,
     Software,
@@ -160,8 +160,8 @@ pub enum EncoderPreference {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum PenMode {
-    /// Native Windows Ink pen with pressure and tilt.
-    WindowsInk,
+    /// Native macOS tablet pen with pressure, tilt and rotation (Photoshop, Blender, Krita…).
+    Tablet,
     /// Pencil behaves like a mouse.
     Mouse,
 }
@@ -172,16 +172,12 @@ pub struct NetworkSettings {
     pub mode: NetworkMode,
     pub https_port: u16,
     pub advertise_mdns: bool,
-    /// Allow "Nearby computers → Connect" pairing requests without a code (PC confirmation is still required).
+    /// Allow "Nearby computers → Connect" pairing requests without a code (confirmation on the Mac is still required).
     pub allow_nearby_pairing: bool,
-    /// Vision-Pro relay used in Remote Access mode, normalized to `wss://host[:port]`.
+    /// Optional account/relay server, used only when signed in.
     pub relay_url: Option<String>,
-    /// Access token required by private relays.
-    pub relay_token: Option<String>,
     /// STUN servers used only in Remote Access mode.
     pub stun_servers: Vec<String>,
-    /// Detect tablets plugged in with a cable and stream to them over that cable.
-    pub usb_direct: bool,
 }
 
 impl Default for NetworkSettings {
@@ -192,9 +188,7 @@ impl Default for NetworkSettings {
             advertise_mdns: true,
             allow_nearby_pairing: true,
             relay_url: None,
-            relay_token: None,
             stun_servers: vec![],
-            usb_direct: true,
         }
     }
 }
@@ -202,7 +196,7 @@ impl Default for NetworkSettings {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct SecuritySettings {
-    /// Every connection (not only pairing) must be confirmed on the PC.
+    /// Every connection (not only pairing) must be confirmed on the Mac.
     pub confirm_every_connection: bool,
     /// Sessions end after this long and silently re-authenticate.
     pub session_max_minutes: u32,
@@ -226,7 +220,8 @@ impl Default for SecuritySettings {
             lockout_minutes: 15,
             pairing_timeout_seconds: 120,
             notify_on_connect: true,
-            emergency_shortcut: "Ctrl+Alt+Shift+Backspace".into(),
+            // ⌘ ⌥ ⇧ ⌫ — registered as a global hotkey by the desktop app.
+            emergency_shortcut: "Super+Alt+Shift+Backspace".into(),
         }
     }
 }
@@ -268,7 +263,7 @@ impl Default for InputSettings {
             allow_mouse: true,
             allow_pen: true,
             allow_touch: true,
-            pen_mode: PenMode::WindowsInk,
+            pen_mode: PenMode::Tablet,
             detect_active_app: true,
         }
     }
@@ -340,8 +335,12 @@ impl Default for Settings {
     }
 }
 
+/// The name chosen in System Settings → General → About ("Bryan's MacBook Pro").
 pub fn default_computer_name() -> String {
-    let user = std::env::var("USERNAME").ok().filter(|u| !u.is_empty());
+    if let Some(name) = crate::platform::system::computer_name() {
+        return name;
+    }
+    let user = std::env::var("USER").ok().filter(|u| !u.is_empty());
     match user {
         Some(user) => {
             let mut chars = user.chars();
@@ -349,9 +348,12 @@ pub fn default_computer_name() -> String {
                 .next()
                 .map(|c| c.to_uppercase().collect::<String>())
                 .unwrap_or_default();
-            format!("{}{}'s PC", first, chars.as_str())
+            format!("{}{}'s Mac", first, chars.as_str())
         }
-        None => gethostname::gethostname().to_string_lossy().to_string(),
+        None => gethostname::gethostname()
+            .to_string_lossy()
+            .trim_end_matches(".local")
+            .to_string(),
     }
 }
 
@@ -423,18 +425,11 @@ impl Settings {
         s.lockout_threshold = s.lockout_threshold.clamp(3, 20);
         s.lockout_minutes = s.lockout_minutes.clamp(1, 24 * 60);
         s.pairing_timeout_seconds = s.pairing_timeout_seconds.clamp(30, 600);
-        self.network.relay_url = self
-            .network
-            .relay_url
-            .as_deref()
-            .and_then(crate::relay::normalize_url);
-        self.network.relay_token = self
-            .network
-            .relay_token
-            .as_deref()
-            .map(str::trim)
-            .filter(|t| (16..=256).contains(&t.len()) && t.chars().all(|c| c.is_ascii_graphic()))
-            .map(str::to_string);
+        if let Some(url) = &self.network.relay_url {
+            if !url.starts_with("https://") {
+                self.network.relay_url = None;
+            }
+        }
         self.network
             .stun_servers
             .retain(|s| s.starts_with("stun:") && s.len() < 256);
@@ -448,35 +443,6 @@ mod tests {
         BitrateMode, CodecSetting, FpsSetting, LatencyProfile, ResolutionMode, Settings,
         VideoSettings,
     };
-
-    #[test]
-    fn relay_settings_are_sanitized() {
-        let mut settings = Settings::default();
-        settings.network.relay_url = Some(" https://Relay.example.com/ ".into());
-        settings.network.relay_token = Some("short".into());
-        settings.sanitize();
-        assert_eq!(
-            settings.network.relay_url.as_deref(),
-            Some("wss://relay.example.com")
-        );
-        assert_eq!(settings.network.relay_token, None);
-        settings.network.relay_url = Some("ws://relay.example.com".into());
-        settings.network.relay_token = Some("0123456789abcdef".into());
-        settings.sanitize();
-        assert_eq!(settings.network.relay_url, None);
-        assert_eq!(
-            settings.network.relay_token.as_deref(),
-            Some("0123456789abcdef")
-        );
-    }
-
-    #[test]
-    fn usb_direct_is_on_by_default_and_for_older_settings_files() {
-        assert!(Settings::default().network.usb_direct);
-        let older: Settings =
-            serde_json::from_str(r#"{"network":{"mode":"local-only","httpsPort":47800}}"#).unwrap();
-        assert!(older.network.usb_direct);
-    }
 
     #[test]
     fn fresh_install_uses_responsive_video_quality() {

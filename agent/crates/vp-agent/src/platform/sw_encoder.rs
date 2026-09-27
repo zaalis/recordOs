@@ -1,4 +1,4 @@
-//! Software H.264 fallback (OpenH264) for PCs without a usable hardware encoder.
+//! Software H.264 fallback (OpenH264) for Macs whose media engine is unavailable or busy.
 
 use crate::media::codec::EncoderCapability;
 use openh264::encoder::{

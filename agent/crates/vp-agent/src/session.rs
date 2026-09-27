@@ -19,8 +19,6 @@ pub enum EndReason {
     Replaced,
     Error,
     Stopped,
-    /// The cable carrying the session was unplugged.
-    LinkLost,
 }
 
 impl EndReason {
@@ -33,29 +31,14 @@ impl EndReason {
             EndReason::Replaced => "replaced",
             EndReason::Error => "error",
             EndReason::Stopped => "stopped",
-            EndReason::LinkLost => "link",
         }
     }
-}
-
-/// Physical path of a session.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Link {
-    /// Wi-Fi or Ethernet on the local network.
-    Lan,
-    /// A USB cable between the tablet and this PC.
-    Usb,
-    /// The Internet relay.
-    Relay,
 }
 
 #[derive(Debug)]
 pub enum SessionCommand {
     End(EndReason),
     SetPermission(Permission),
-    /// A cable path to this PC appeared; the iPad may move its session to it.
-    UsbAvailable(Vec<String>),
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -73,10 +56,6 @@ pub struct SessionInfo {
     pub stats: Option<AgentStats>,
     pub rtt_ms: Option<f32>,
     pub active_app: Option<String>,
-    pub via_relay: bool,
-    pub link: Link,
-    /// Address of this PC the session arrived on.
-    pub local_ip: Option<String>,
 }
 
 pub struct SessionEntry {
@@ -153,31 +132,6 @@ impl SessionRegistry {
         let map = self.sessions.read();
         map.values()
             .filter(|e| e.commands.try_send(SessionCommand::End(reason)).is_ok())
-            .count()
-    }
-
-    /// Ends the sessions carried by a local address (a cable that was unplugged).
-    pub fn end_by_local_ip(&self, local_ip: &str, reason: EndReason) -> usize {
-        let map = self.sessions.read();
-        map.values()
-            .filter(|e| e.info.read().local_ip.as_deref() == Some(local_ip))
-            .filter(|e| e.commands.try_send(SessionCommand::End(reason)).is_ok())
-            .count()
-    }
-
-    /// Tells every local-network session that the PC is also reachable through a cable.
-    pub fn offer_usb(&self, urls: &[String]) -> usize {
-        if urls.is_empty() {
-            return 0;
-        }
-        let map = self.sessions.read();
-        map.values()
-            .filter(|e| e.info.read().link == Link::Lan)
-            .filter(|e| {
-                e.commands
-                    .try_send(SessionCommand::UsbAvailable(urls.to_vec()))
-                    .is_ok()
-            })
             .count()
     }
 

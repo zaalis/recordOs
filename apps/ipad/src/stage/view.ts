@@ -1,4 +1,4 @@
-/** Local zoom & pan of the remote screen (does not change what the PC renders). */
+/** Local zoom & pan of the remote screen (does not change what the Mac renders). */
 
 export interface ViewState {
   scale: number;

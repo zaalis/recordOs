@@ -5,5 +5,6 @@ export default defineConfig({
   plugins: [react()],
   clearScreen: false,
   server: { port: 5174, strictPort: true },
-  build: { target: 'chrome110', sourcemap: false, cssCodeSplit: false },
+  // Tauri renders with WKWebView (Safari 16+ on macOS 13).
+  build: { target: 'safari16', sourcemap: false, cssCodeSplit: false },
 });
