@@ -150,10 +150,20 @@ export function Session() {
     const fallback = window.setTimeout(reveal, 4000);
     video.addEventListener('loadeddata', reveal, { once: true });
     video.srcObject = snapshot.stream;
-    void video.play().catch(() => undefined);
+    // Safari pauses the element when the tab is hidden or restored from the cache.
+    const resume = () => {
+      if (!document.hidden && video.srcObject === snapshot.stream && video.paused) {
+        void video.play().catch(() => undefined);
+      }
+    };
+    resume();
+    video.addEventListener('loadedmetadata', resume);
+    document.addEventListener('visibilitychange', resume);
     return () => {
       window.clearTimeout(fallback);
       video.removeEventListener('loadeddata', reveal);
+      video.removeEventListener('loadedmetadata', resume);
+      document.removeEventListener('visibilitychange', resume);
     };
   }, [snapshot.stream]);
 

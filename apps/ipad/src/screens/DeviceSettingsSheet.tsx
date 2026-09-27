@@ -14,8 +14,12 @@ export function DeviceSettingsSheet({ open, onClose }: { open: boolean; onClose:
       setConfirmReset(true);
       return;
     }
-    await resetEverything();
-    location.reload();
+    try {
+      await resetEverything(() => toast('Close other Vision-Pro tabs to finish resetting this iPad.', { icon: 'alert', tone: 'orange' }));
+      location.reload();
+    } catch {
+      toast('The reset could not be completed. Please try again.', { icon: 'alert', tone: 'orange' });
+    }
   };
 
   return (

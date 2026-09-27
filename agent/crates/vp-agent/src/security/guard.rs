@@ -9,8 +9,11 @@ use std::time::{Duration, Instant};
 const FAILURE_WINDOW: Duration = Duration::from_secs(15 * 60);
 const DENIAL_WINDOW: Duration = Duration::from_secs(60 * 60);
 const MAX_TRACKED_IPS: usize = 4096;
-const CONN_BURST: f64 = 12.0;
-const CONN_PER_SEC: f64 = 0.5;
+// This bucket covers every TCP connection, including page assets, API reads
+// and signaling. Two quick Safari page loads plus reconnects must fit without
+// being mistaken for a flood. Authentication failures have a separate lockout.
+const CONN_BURST: f64 = 32.0;
+const CONN_PER_SEC: f64 = 4.0;
 const MAX_LOCKOUT: Duration = Duration::from_secs(24 * 60 * 60);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -204,5 +207,16 @@ mod tests {
             .filter(|_| guard.check_connection(ip) == Verdict::Allow)
             .count();
         assert_eq!(allowed, CONN_BURST as usize);
+    }
+
+    #[test]
+    fn normal_page_reload_and_signaling_retries_fit_connection_bucket() {
+        let guard = Guard::new(5, 15);
+        let ip: IpAddr = "10.0.0.3".parse().unwrap();
+        // Each page load can use several TCP sockets for HTML, JS, CSS, API
+        // and service-worker requests before the WebSocket is established.
+        for _ in 0..24 {
+            assert_eq!(guard.check_connection(ip), Verdict::Allow);
+        }
     }
 }

@@ -168,11 +168,15 @@ export class Connection {
   private pingId = 0;
   private pings = new Map<number, number>();
   private lastBytes: { bytes: number; at: number } | null = null;
-  private lastFrames: { decoded: number; decodeTime: number; jbDelay: number; jbCount: number } | null = null;
+  private lastFrames: { decoded: number; decodeTime: number; jbDelay: number; jbCount: number; at: number } | null = null;
   private lowDecodeSamples = 0;
   private performanceRecoveryApplied = false;
   private closedByUser = false;
   private reconnectTimer?: number;
+  private peerTimer?: number;
+  private lastFrameProgressAt = 0;
+  private keyframeRecoveryRequested = false;
+  private suspendedForPagehide = false;
   // A connect request can outlive the screen which started it while Safari is
   // detecting codecs. Keep late async work from resurrecting a cancelled or
   // superseded session.
@@ -245,6 +249,7 @@ export class Connection {
     this.video = video;
     this.lowDecodeSamples = 0;
     this.performanceRecoveryApplied = false;
+    this.suspendedForPagehide = false;
     this.update({ ...this.initial(), phase: 'connecting' });
     [this.codecs, this.refreshHz] = await Promise.all([detectCodecs(), measureRefreshRate()]);
     if (this.closedByUser || connectEpoch !== this.connectEpoch) return;
@@ -317,6 +322,8 @@ export class Connection {
         case 'error':
           // Only a path problem falls back; an authorization answer (revoked, locked out…) is shown.
           if (this.snapshot.switching && (event.code === 'unreachable' || event.code === 'protocol')) this.abortCableMove(url);
+          // A known PC that is briefly unreachable or rate limiting is retried, not abandoned.
+          else if (target.mode === 'auth' && (event.code === 'unreachable' || event.code === 'rate_limited')) this.scheduleReconnect(event.retryAfterMs);
           else this.fail(event.code);
           break;
         case 'closed':
@@ -418,6 +425,7 @@ export class Connection {
       rtcpMuxPolicy: 'require',
     });
     this.pc = pc;
+    let trackReceived = false;
     const transceiver = pc.addTransceiver('video', { direction: 'recvonly' });
     this.applyCodecPreferences(transceiver);
 
@@ -438,6 +446,12 @@ export class Connection {
     };
 
     pc.ontrack = (event) => {
+      if (!this.isCurrentPeer(pc, peerEpoch)) return;
+      trackReceived = true;
+      if (pc.connectionState === 'connected') {
+        window.clearTimeout(this.peerTimer);
+        this.peerTimer = undefined;
+      }
       const receiver = event.receiver as RTCRtpReceiver & { jitterBufferTarget?: number; playoutDelayHint?: number };
       try {
         if ('jitterBufferTarget' in receiver) receiver.jitterBufferTarget = 0;
@@ -446,17 +460,28 @@ export class Connection {
         /* not supported */
       }
       const stream = event.streams[0] ?? new MediaStream([event.track]);
+      event.track.onended = () => {
+        if (this.isCurrentPeer(pc, peerEpoch)) this.scheduleReconnect(0);
+      };
       this.update({ stream });
     };
     pc.onconnectionstatechange = () => {
+      if (!this.isCurrentPeer(pc, peerEpoch)) return;
       const state = pc.connectionState;
       this.update({ stats: { ...this.snapshot.stats, connectionState: state } });
-      if (state === 'connected' && this.snapshot.phase !== 'streaming') {
-        this.update({ phase: 'streaming', switching: false, connectedAt: this.snapshot.connectedAt ?? Date.now() });
+      if (state === 'connected') {
+        if (trackReceived) {
+          window.clearTimeout(this.peerTimer);
+          this.peerTimer = undefined;
+        }
+        if (this.snapshot.phase !== 'streaming') {
+          this.update({ phase: 'streaming', switching: false, reconnectAttempt: 0, connectedAt: this.snapshot.connectedAt ?? Date.now() });
+        }
       }
-      if (state === 'failed') this.scheduleReconnect();
+      if (state === 'failed') this.scheduleReconnect(0);
     };
     pc.oniceconnectionstatechange = () => {
+      if (!this.isCurrentPeer(pc, peerEpoch)) return;
       const state = pc.iceConnectionState;
       this.update({ stats: { ...this.snapshot.stats, iceState: state } });
       window.clearTimeout(this.iceWatchdog);
@@ -469,6 +494,13 @@ export class Connection {
         }, grace);
       }
     };
+
+    // Media must actually flow: a peer that never delivers a track is replaced.
+    this.peerTimer = window.setTimeout(() => {
+      if (!this.isCurrentPeer(pc, peerEpoch) || (pc.connectionState === 'connected' && trackReceived)) return;
+      if (this.target?.mode === 'auth') this.scheduleReconnect();
+      else this.failMessage('La diffusion sécurisée n’a pas démarré. Réessayez la connexion.');
+    }, 22_000);
 
     try {
       const offer = await pc.createOffer();
@@ -499,7 +531,8 @@ export class Connection {
       } as unknown as { t: string });
     } catch {
       if (this.isCurrentPeer(pc, peerEpoch) && !this.closedByUser) {
-        this.failMessage('La diffusion sécurisée n’a pas pu démarrer. Réessayez la connexion.');
+        if (this.target?.mode === 'auth') this.scheduleReconnect();
+        else this.failMessage('La diffusion sécurisée n’a pas pu démarrer. Réessayez la connexion.');
       }
     }
   }
@@ -530,15 +563,16 @@ export class Connection {
   private async onSignalMessage(message: { t: string } & Record<string, unknown>): Promise<void> {
     switch (message.t) {
       case 'rtc.answer': {
-        if (!this.pc) return;
+        const pc = this.pc;
+        if (!pc) return;
         window.clearTimeout(this.answerTimer);
         try {
-          await this.pc.setRemoteDescription({ type: 'answer', sdp: String(message.sdp) });
+          await pc.setRemoteDescription({ type: 'answer', sdp: String(message.sdp) });
         } catch {
-          this.failMessage('La réponse vidéo du PC est invalide. Réessayez la connexion.');
+          if (pc === this.pc) this.failMessage('La réponse vidéo du PC est invalide. Réessayez la connexion.');
           return;
         }
-        this.update({ video: message.video as AppliedVideo });
+        if (pc === this.pc) this.update({ video: message.video as AppliedVideo });
         return;
       }
       case 'rtc.error':
@@ -642,11 +676,12 @@ export class Connection {
   private clearTimers(): void {
     for (const timer of this.timers) window.clearInterval(timer);
     this.timers = [];
+    this.pings.clear();
   }
 
   private async collectStats(): Promise<void> {
     const pc = this.pc;
-    if (!pc) return;
+    if (!pc || document.hidden) return;
     let report: RTCStatsReport;
     try {
       report = await pc.getStats();
@@ -658,6 +693,8 @@ export class Connection {
     const stats: LiveStats = { ...this.snapshot.stats };
     let codecId: string | undefined;
     const now = performance.now();
+    let decodedProgress = false;
+    let decodedCounterAvailable = false;
     report.forEach((entry: Record<string, unknown> & { type: string }) => {
       if (entry.type === 'inbound-rtp' && entry.kind === 'video') {
         stats.fps = numberOr(entry.framesPerSecond, stats.fps);
@@ -673,20 +710,23 @@ export class Connection {
           if (seconds > 0) stats.bitrateKbps = ((bytes - this.lastBytes.bytes) * 8) / 1000 / seconds;
         }
         this.lastBytes = { bytes, at: now };
+        decodedCounterAvailable = typeof entry.framesDecoded === 'number';
         const decoded = Number(entry.framesDecoded ?? 0);
         const decodeTime = Number(entry.totalDecodeTime ?? 0);
         const jbDelay = Number(entry.jitterBufferDelay ?? 0);
         const jbCount = Number(entry.jitterBufferEmittedCount ?? 0);
         if (this.lastFrames) {
           const frames = decoded - this.lastFrames.decoded;
+          decodedProgress = frames > 0;
+          const seconds = (now - this.lastFrames.at) / 1000;
+          if (seconds > 0) stats.decodedFps = Math.max(0, frames) / seconds;
           if (frames > 0) {
-            stats.decodedFps = frames;
             stats.decodeMs = ((decodeTime - this.lastFrames.decodeTime) / frames) * 1000;
           }
           const emitted = jbCount - this.lastFrames.jbCount;
           if (emitted > 0) stats.jitterBufferMs = ((jbDelay - this.lastFrames.jbDelay) / emitted) * 1000;
         }
-        this.lastFrames = { decoded, decodeTime, jbDelay, jbCount };
+        this.lastFrames = { decoded, decodeTime, jbDelay, jbCount, at: now };
         codecId = entry.codecId as string | undefined;
       }
       if (entry.type === 'candidate-pair' && (entry.nominated || entry.selected) && entry.state === 'succeeded') {
@@ -706,7 +746,27 @@ export class Connection {
       stats.videoLatencyMs = agent.captureMs + agent.encodeMs + halfRtt + (stats.jitterBufferMs ?? 0) + (stats.decodeMs ?? 0) + frame / 2;
     }
     this.maybeRecoverPerformance(stats);
+    if (decodedCounterAvailable) this.maybeRecoverFrozenVideo(stats, decodedProgress);
     this.update({ stats });
+  }
+
+  private maybeRecoverFrozenVideo(stats: LiveStats, decodedProgress: boolean): void {
+    if (this.snapshot.phase !== 'streaming') return;
+    if (decodedProgress) {
+      this.lastFrameProgressAt = Date.now();
+      this.keyframeRecoveryRequested = false;
+      return;
+    }
+    // Idle desktops still send refresh frames. Require evidence that the PC
+    // is sending before treating a static picture as a stalled receiver.
+    if ((stats.agent?.sentFps ?? 0) < 1 || !this.lastFrames) return;
+    this.lastFrameProgressAt ||= Date.now();
+    const stalledMs = Date.now() - this.lastFrameProgressAt;
+    if (stalledMs > 6_000 && !this.keyframeRecoveryRequested) {
+      this.keyframeRecoveryRequested = true;
+      this.requestKeyframe();
+    }
+    if (stalledMs > 14_000) this.scheduleReconnect(0);
   }
 
   /**
@@ -743,18 +803,30 @@ export class Connection {
   }
 
   sendControl(message: ControlToAgent): void {
-    if (this.control?.readyState === 'open') this.control.send(JSON.stringify(message));
+    try {
+      if (this.control?.readyState === 'open') this.control.send(JSON.stringify(message));
+    } catch {
+      // The channel can close between readyState and send during a tab switch.
+    }
   }
 
   /** Reliable, ordered input (clicks, keys, pen strokes). */
   sendInput(buffer: ArrayBuffer): void {
-    if (this.input?.readyState === 'open' && this.snapshot.controlAllowed) this.input.send(buffer);
+    try {
+      if (this.input?.readyState === 'open' && this.snapshot.controlAllowed) this.input.send(buffer);
+    } catch {
+      // Input is discarded while a failed transport is being replaced.
+    }
   }
 
   /** Latest-wins input (hover moves). Dropped under congestion rather than delayed. */
   sendRealtime(buffer: ArrayBuffer): void {
     const channel = this.realtime;
-    if (channel?.readyState === 'open' && this.snapshot.controlAllowed && channel.bufferedAmount < 16_000) channel.send(buffer);
+    try {
+      if (channel?.readyState === 'open' && this.snapshot.controlAllowed && channel.bufferedAmount < 16_000) channel.send(buffer);
+    } catch {
+      // Movement is latest-wins; a closing channel must not queue stale input.
+    }
   }
 
   updateVideo(video: VideoSettings): void {
@@ -783,7 +855,7 @@ export class Connection {
   private onSignalClosed(): void {
     if (this.closedByUser) return;
     if (this.snapshot.phase === 'failed' || this.snapshot.phase === 'ended') return;
-    if (this.snapshot.phase === 'streaming' || this.snapshot.phase === 'negotiating' || this.snapshot.phase === 'reconnecting') {
+    if (this.target?.mode === 'auth' || this.snapshot.phase === 'streaming' || this.snapshot.phase === 'negotiating' || this.snapshot.phase === 'reconnecting') {
       this.scheduleReconnect();
     } else {
       this.fail('protocol');
@@ -818,7 +890,7 @@ export class Connection {
     const connectEpoch = this.connectEpoch;
     this.reconnectTimer = window.setTimeout(() => {
       this.reconnectTimer = undefined;
-      if (!this.closedByUser && connectEpoch === this.connectEpoch && this.snapshot.phase === 'reconnecting') void this.openSignaling();
+      if (!this.closedByUser && connectEpoch === this.connectEpoch && this.snapshot.phase === 'reconnecting' && !this.signaling) void this.openSignaling();
     }, delay ?? Math.min(8000, 400 * 2 ** (attempt - 1)));
   }
 
@@ -840,6 +912,8 @@ export class Connection {
     this.clearTimers();
     window.clearTimeout(this.iceWatchdog);
     window.clearTimeout(this.answerTimer);
+    window.clearTimeout(this.peerTimer);
+    this.peerTimer = undefined;
     for (const channel of [this.control, this.input, this.realtime]) {
       if (channel) {
         channel.onmessage = null;
@@ -861,6 +935,8 @@ export class Connection {
     }
     this.lastBytes = null;
     this.lastFrames = null;
+    this.lastFrameProgressAt = 0;
+    this.keyframeRecoveryRequested = false;
   }
 
   private teardown(clearStream = true): void {
@@ -874,9 +950,47 @@ export class Connection {
     if (clearStream) this.update({ stream: null });
   }
 
+  /** Release live sockets when Safari caches or closes this page. */
+  suspendForPagehide(): void {
+    if (!this.target || this.closedByUser || this.snapshot.phase === 'idle' || this.snapshot.phase === 'failed') return;
+    this.suspendedForPagehide = true;
+    this.connectEpoch += 1;
+    this.teardown();
+    if (this.target.mode === 'auth') {
+      this.update({ phase: 'reconnecting', session: null, video: null, connectedAt: null, stats: EMPTY_STATS, switching: false });
+    }
+  }
+
+  resumeVisible(): void {
+    if (this.closedByUser || !this.target) return;
+    // Re-entering a cached page resumes JS timers but not necessarily its
+    // WebSocket or ICE transport. Start a fresh authenticated session.
+    if (this.suspendedForPagehide) {
+      this.suspendedForPagehide = false;
+      if (this.target.mode === 'auth') this.scheduleReconnect(0);
+      else this.failMessage('La demande d’association a été interrompue. Réessayez.');
+      return;
+    }
+    this.lastFrames = null;
+    this.lastBytes = null;
+    this.lastFrameProgressAt = Date.now();
+    if (this.snapshot.phase === 'reconnecting') {
+      if (!this.signaling) {
+        window.clearTimeout(this.reconnectTimer);
+        this.reconnectTimer = undefined;
+        void this.openSignaling();
+      }
+    } else if (this.snapshot.phase === 'streaming') {
+      if (!this.pc || this.pc.connectionState === 'failed' || this.pc.connectionState === 'closed' || this.pc.connectionState === 'disconnected') {
+        this.scheduleReconnect(0);
+      } else this.requestKeyframe();
+    }
+  }
+
   disconnect(): void {
     this.connectEpoch += 1;
     this.closedByUser = true;
+    this.suspendedForPagehide = false;
     this.teardown();
     this.update({ phase: 'ended', session: null, stats: EMPTY_STATS, connectedAt: null, link: null, switching: false });
   }
@@ -884,6 +998,7 @@ export class Connection {
   reset(): void {
     this.connectEpoch += 1;
     this.closedByUser = true;
+    this.suspendedForPagehide = false;
     this.teardown();
     this.update(this.initial());
   }

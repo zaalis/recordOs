@@ -122,24 +122,29 @@ export class SignalingClient {
   async send(message: { t: string } & Record<string, unknown>): Promise<void> {
     if (!this.channel || this.stage !== 'secure') throw new Error('channel not ready');
     const frames = await this.channel.seal(message);
-    for (const frame of frames) this.socket?.send(JSON.stringify(frame));
+    if (this.socket?.readyState !== 1) throw new Error('signaling socket closed');
+    for (const frame of frames) this.socket.send(JSON.stringify(frame));
   }
 
   close(): void {
     this.clearHandshakeTimer();
-    if (this.stage === 'secure') {
-      void this.send({ t: 'session.close' }).catch(() => undefined);
-    }
+    if (this.stage === 'closed') return;
+    const socket = this.socket;
+    // Give an explicit disconnect a chance to reach the agent, but always
+    // release the transport even if WebCrypto is suspended by Safari.
+    if (this.stage === 'secure' && socket?.readyState === 1) {
+      void this.send({ t: 'session.close' }).catch(() => undefined).finally(() => socket.close());
+      setTimeout(() => socket.close(), 250);
+    } else socket?.close();
     this.stage = 'closed';
-    setTimeout(() => this.socket?.close(), 50);
   }
 
   private fail(code: string): void {
     if (this.stage === 'closed') return;
     this.clearHandshakeTimer();
-    this.emit({ type: 'error', code });
     this.stage = 'closed';
     this.socket?.close();
+    this.emit({ type: 'error', code });
   }
 
   private async handle(text: string): Promise<void> {
@@ -148,13 +153,14 @@ export class SignalingClient {
     const message = JSON.parse(text) as Record<string, unknown>;
 
     if (message.t === 'error') {
+      this.clearHandshakeTimer();
+      this.stage = 'closed';
+      this.socket?.close();
       this.emit({
         type: 'error',
         code: String(message.code),
         ...(typeof message.retryAfterMs === 'number' ? { retryAfterMs: message.retryAfterMs } : {}),
       });
-      this.stage = 'closed';
-      this.socket?.close();
       return;
     }
 
@@ -187,6 +193,9 @@ export class SignalingClient {
         this.sendPlain({ t: 'prove', sig });
         this.stage = 'secure';
         this.clearHandshakeTimer();
+        // Authentication must also complete; reaching the encrypted channel
+        // alone is not enough to start video. Pairing gets its approval window.
+        this.handshakeTimer = setTimeout(() => this.fail('unreachable'), this.options.mode === 'pair' ? 90_000 : 20_000);
         if (this.options.mode === 'pair') {
           const proof = this.options.proof
             ? { kind: this.options.proof.kind, mac: b64u(await pairProofMac(this.options.proof.secret, keys.transcript)) }
@@ -207,6 +216,7 @@ export class SignalingClient {
             this.emit({ type: 'paired', approved: opened.approved === true });
             return;
           case 'session.ready':
+            this.clearHandshakeTimer();
             this.emit({ type: 'ready', session: opened as unknown as SessionReady, sas: this.keys!.sas });
             return;
           default:

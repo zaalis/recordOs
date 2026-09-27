@@ -15,6 +15,19 @@ export function App() {
   const ready = useApp((s) => s.ready);
   const phase = useSyncExternalStore(connection.subscribe, () => connection.getSnapshot().phase);
 
+  useEffect(() => {
+    const onPagehide = () => connection.suspendForPagehide();
+    const onVisible = () => { if (!document.hidden) connection.resumeVisible(); };
+    window.addEventListener('pagehide', onPagehide);
+    window.addEventListener('pageshow', onVisible);
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      window.removeEventListener('pagehide', onPagehide);
+      window.removeEventListener('pageshow', onVisible);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  }, []);
+
   // Remember and pin every PC this iPad successfully connects to.
   useEffect(() => {
     connection.onPaired = ({ agentId, name, fingerprint, relayUrl, usbUrls }) => {

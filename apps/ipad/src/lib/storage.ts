@@ -89,7 +89,7 @@ export const DEFAULT_PREFERENCES: Preferences = {
 let dbPromise: Promise<IDBDatabase> | null = null;
 
 function db(): Promise<IDBDatabase> {
-  dbPromise ??= new Promise((resolve, reject) => {
+  dbPromise ??= new Promise<IDBDatabase>((resolve, reject) => {
     const request = indexedDB.open(DB_NAME, DB_VERSION);
     request.onupgradeneeded = () => {
       const database = request.result;
@@ -99,8 +99,12 @@ function db(): Promise<IDBDatabase> {
     };
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
+  }).catch((error: unknown) => {
+    // A transient IndexedDB failure must not poison all later retries.
+    dbPromise = null;
+    throw error;
   });
-  return dbPromise;
+  return dbPromise as Promise<IDBDatabase>;
 }
 
 function run<T>(store: string, mode: IDBTransactionMode, fn: (s: IDBObjectStore) => IDBRequest<T>): Promise<T> {
@@ -109,8 +113,10 @@ function run<T>(store: string, mode: IDBTransactionMode, fn: (s: IDBObjectStore)
       new Promise<T>((resolve, reject) => {
         const tx = database.transaction(store, mode);
         const request = fn(tx.objectStore(store));
-        request.onsuccess = () => resolve(request.result);
-        request.onerror = () => reject(request.error);
+        let result: T;
+        request.onsuccess = () => { result = request.result; };
+        tx.oncomplete = () => resolve(result);
+        tx.onabort = () => reject(tx.error ?? request.error ?? new Error('IndexedDB transaction aborted'));
       }),
   );
 }
@@ -191,7 +197,7 @@ export async function deleteProfile(id: string): Promise<void> {
 }
 
 /** Removes every local secret and pairing (Settings → Reset this iPad). */
-export async function resetEverything(): Promise<void> {
+export async function resetEverything(onBlocked?: () => void): Promise<void> {
   const database = await db();
   database.close();
   dbPromise = null;
@@ -199,6 +205,6 @@ export async function resetEverything(): Promise<void> {
     const request = indexedDB.deleteDatabase(DB_NAME);
     request.onsuccess = () => resolve();
     request.onerror = () => reject(request.error);
-    request.onblocked = () => resolve();
+    request.onblocked = () => onBlocked?.();
   });
 }

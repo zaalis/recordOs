@@ -78,10 +78,15 @@ export async function detectCodecs(): Promise<ClientCodecSupport[]> {
     // prefer a genuinely hardware-decoded 4K codec and safely fall back.
     let powerEfficient = true;
     try {
-      const info = await navigator.mediaCapabilities?.decodingInfo({
+      const query = navigator.mediaCapabilities?.decodingInfo({
         type: 'webrtc',
         video: { contentType: mime, width: 3840, height: 2160, bitrate: 200_000_000, framerate: 60 },
       } as MediaDecodingConfiguration);
+      let timeout = 0;
+      const info = query && await Promise.race([
+        query,
+        new Promise<undefined>((resolve) => { timeout = window.setTimeout(() => resolve(undefined), 500); }),
+      ]).finally(() => window.clearTimeout(timeout));
       if (info) powerEfficient = info.supported && info.powerEfficient;
     } catch {
       // Some iPadOS versions do not expose a 4K WebRTC query. SDP negotiation
@@ -95,20 +100,34 @@ export async function detectCodecs(): Promise<ClientCodecSupport[]> {
 /** Measures the display refresh rate from requestAnimationFrame timing (60 or 120 on ProMotion). */
 export function measureRefreshRate(samples = 40): Promise<number> {
   return new Promise((resolve) => {
+    if (document.hidden) { resolve(60); return; }
     const deltas: number[] = [];
     let last = 0;
+    let frame = 0;
+    let done = false;
+    const finish = (hz: number) => {
+      if (done) return;
+      done = true;
+      window.clearTimeout(timeout);
+      cancelAnimationFrame(frame);
+      resolve(hz);
+    };
+    // Safari can suspend animation frames while a tab is being restored.
+    // A missing sample must never block the connection itself.
+    const timeout = window.setTimeout(() => finish(60), 1_500);
     const step = (t: number) => {
+      if (done) return;
       if (last) deltas.push(t - last);
       last = t;
-      if (deltas.length < samples) requestAnimationFrame(step);
+      if (deltas.length < samples) frame = requestAnimationFrame(step);
       else {
         deltas.sort((a, b) => a - b);
         const median = deltas[Math.floor(deltas.length / 2)] ?? 16.7;
         const hz = 1000 / median;
-        resolve(hz > 100 ? 120 : hz > 80 ? 90 : 60);
+        finish(hz > 100 ? 120 : hz > 80 ? 90 : 60);
       }
     };
-    requestAnimationFrame(step);
+    frame = requestAnimationFrame(step);
   });
 }
 
