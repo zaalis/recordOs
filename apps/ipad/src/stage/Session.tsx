@@ -15,7 +15,7 @@ import {
   type ProfileControl,
   type VideoSettings,
 } from '@vision-pro/protocol';
-import { Badge, Button, Group, Icon, IconButton, Row, Segmented, Slider, Switch, formatBitrate, formatMs } from '@vision-pro/design';
+import { Badge, Button, Group, Icon, IconButton, Row, Segmented, Slider, Switch, formatBitrate, formatMs, useToast } from '@vision-pro/design';
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { connection } from '../lib/connection.ts';
 import { allProfiles, setScreen, store, updatePrefs, useApp } from '../lib/store.ts';
@@ -36,6 +36,7 @@ export function Session() {
   const surfaceRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
+  const freezeRef = useRef<HTMLCanvasElement>(null);
   const hiddenInputRef = useRef<HTMLInputElement>(null);
   const viewRef = useRef(new ViewTransform());
   const controllerRef = useRef<InputController | null>(null);
@@ -50,6 +51,17 @@ export function Session() {
   const [inputSource, setInputSource] = useState<InputSource>('fingers');
   const [fullscreen, setFullscreen] = useState(() => isFullscreenActive());
   const activityTimer = useRef(0);
+  const toast = useToast();
+  const previousLink = useRef(snapshot.link);
+
+  // Confirm the move when a plugged-in cable takes over the stream (and when it is unplugged).
+  useEffect(() => {
+    const before = previousLink.current;
+    previousLink.current = snapshot.link;
+    if (!before || !snapshot.link || before === snapshot.link) return;
+    if (snapshot.link === 'usb') toast('Flux transmis par le câble USB', { icon: 'cable', tone: 'green' });
+    else if (before === 'usb') toast('Câble débranché : le flux repasse par le réseau', { icon: 'wifi' });
+  }, [snapshot.link, toast]);
 
   const activeProfile = useMemo(() => {
     const profiles = allProfiles();
@@ -120,7 +132,26 @@ export function Session() {
   useEffect(() => {
     const video = videoRef.current;
     if (!video || !snapshot.stream) return;
+    // A new stream (cable plugged or unplugged, reconnection) starts black: keep the last
+    // picture on screen until its first frame is decoded.
+    const freeze = freezeRef.current;
+    if (freeze && video.srcObject && video.srcObject !== snapshot.stream && video.videoWidth > 0) {
+      try {
+        freeze.width = video.videoWidth;
+        freeze.height = video.videoHeight;
+        freeze.getContext('2d')?.drawImage(video, 0, 0);
+        freeze.hidden = false;
+      } catch {
+        freeze.hidden = true;
+      }
+    }
+    const reveal = () => {
+      if (freeze) freeze.hidden = true;
+    };
+    const fallback = window.setTimeout(reveal, 4000);
+    video.addEventListener('loadeddata', reveal, { once: true });
     video.srcObject = snapshot.stream;
+    // Safari pauses the element when the tab is hidden or restored from the cache.
     const resume = () => {
       if (!document.hidden && video.srcObject === snapshot.stream && video.paused) {
         void video.play().catch(() => undefined);
@@ -130,11 +161,19 @@ export function Session() {
     video.addEventListener('loadedmetadata', resume);
     document.addEventListener('visibilitychange', resume);
     return () => {
+      window.clearTimeout(fallback);
+      video.removeEventListener('loadeddata', reveal);
       video.removeEventListener('loadedmetadata', resume);
       document.removeEventListener('visibilitychange', resume);
-      if (video.srcObject === snapshot.stream) video.srcObject = null;
     };
   }, [snapshot.stream]);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    return () => {
+      if (video) video.srcObject = null;
+    };
+  }, []);
 
   useEffect(() => {
     connection.onCursor = (next) => setCursor(next);
@@ -296,6 +335,7 @@ export function Session() {
       {prefs.stageMode === 'stream' && <>
         <div ref={canvasRef} className="stage-canvas" style={{ transform: `translate3d(${view.x}px, ${view.y}px, 0) scale(${view.scale})` }}>
           <video ref={videoRef} className="stage-video" playsInline muted />
+          <canvas ref={freezeRef} className="stage-video" hidden aria-hidden="true" />
         </div>
         {!snapshot.stream && <div className="stage-waiting"><Icon name="display" size={34} /><span>Waiting for the first secure video frame…</span></div>}
       </>}
@@ -312,7 +352,7 @@ export function Session() {
       {prefs.stageMode === 'stream' && view.scale > 1.01 && <div className="zoom-indicator vp-glass">{Math.round(view.scale * 100)}% <IconButton icon="close" label="Reset zoom" size="sm" onClick={() => viewRef.current.reset()} /></div>}
       {prefs.stageMode === 'stream' && <div className="input-source-indicator vp-glass" aria-live="polite"><Icon name={inputSource === 'pencil' ? 'pencil' : inputSource === 'pointer' ? 'trackpad' : 'touch'} size={16} /><span>{threeDNavigation !== 'none' ? activeProfile.name : 'macOS'}</span><span aria-hidden="true">·</span><span>{inputSource === 'pencil' ? 'Apple Pencil' : inputSource === 'pointer' ? 'Trackpad or mouse' : 'Fingers'}</span></div>}
       {!snapshot.controlAllowed && <div className="banner vp-glass"><Icon name="eye" size={18} /> View only — input is disabled on the Mac</div>}
-      {snapshot.phase === 'reconnecting' && <div className="banner vp-glass"><span className="vp-spinner" /> Reconnecting securely…</div>}
+      {snapshot.phase === 'reconnecting' && !snapshot.switching && <div className="banner vp-glass"><span className="vp-spinner" /> Reconnecting securely…</div>}
 
       {prefs.showStats && <Stats state={snapshot} />}
       {panel && !interfaceHidden && <PanelView panel={panel} profile={activeProfile} prefs={prefs} state={snapshot} onClose={() => setPanel(null)} onMode={setMode} onStageMode={setStageMode} onCombo={sendCombo} onTextFocus={() => hiddenInputRef.current?.focus()} style={panelStyle} latched={latched} setLatched={setLatched} />}
@@ -445,14 +485,14 @@ function SessionSettings({ prefs, state, onStageMode }: { prefs: Preferences; st
   return <>
     <Group title="Affichage"><div className="field-stack"><span>Surface de travail</span><Segmented block ariaLabel="Surface de travail" value={prefs.stageMode} options={[{ value: 'stream', label: 'Écran du Mac' }, { value: 'tablet', label: 'Tablette graphique' }]} onChange={(mode) => onStageMode(mode as StageMode)} /></div><p className="vp-footnote">Tablette graphique masque l’image du Mac et conserve les gestes de contrôle sur une surface noire à points fins.</p></Group>
     <Group title="Interface"><Row icon="stats" title="Statistics overlay" accessory={<Switch label="Statistics overlay" checked={prefs.showStats} onChange={(showStats) => updatePrefs({ showStats })} />} /><Row icon="pointer" title="Remote cursor" accessory={<Switch label="Remote cursor" checked={prefs.showLocalCursor} onChange={(showLocalCursor) => updatePrefs({ showLocalCursor })} />} /><Row icon="collapse" title="Commandes masquées après 5 secondes" value="Activé" /><Row icon="fullscreen" title="Fullscreen" onClick={() => void toggleFullscreen()} chevron /></Group>
-    <Group title="Connection"><Row icon="shield" title="Encryption" value="DTLS + E2EE" /><Row icon="network" title="Path" value={state.stats.candidateType ?? 'Local'} /><Row icon="clock" title="Session" value={state.session?.expiresAt ? new Date(state.session.expiresAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'Active'} /></Group>
+    <Group title="Connection"><Row icon="shield" title="Encryption" value="DTLS + E2EE" /><Row icon={state.link === 'usb' ? 'cable' : 'network'} title="Path" value={state.link === 'usb' ? 'Câble USB' : state.link === 'relay' || state.stats.candidateType === 'relay' ? 'Internet relay' : 'Réseau local'} /><Row icon="clock" title="Session" value={state.session?.expiresAt ? new Date(state.session.expiresAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'Active'} /></Group>
     <Button variant="danger" icon="power" block onClick={() => { connection.disconnect(); setScreen('home'); }}>Disconnect</Button>
   </>;
 }
 
 function Stats({ state }: { state: ReturnType<typeof connection.getSnapshot> }) {
   const stats = state.stats;
-  return <aside className="stats-overlay" aria-label="Connection statistics"><div className="stats-title"><span className="vp-dot" data-tone="green" /> Live</div><dl><dt>Ping</dt><dd>{formatMs(stats.pingMs)}</dd><dt>Input</dt><dd>{formatMs(stats.inputLatencyMs)}</dd><dt>Video</dt><dd>{formatMs(stats.videoLatencyMs)}</dd><dt>Decoded</dt><dd>{stats.decodedFps?.toFixed(0) ?? '—'} FPS</dd><dt>Captured</dt><dd>{stats.agent?.captureFps?.toFixed(0) ?? '—'} FPS</dd><dt>Sent</dt><dd>{stats.agent?.sentFps?.toFixed(0) ?? '—'} FPS</dd><dt>Bitrate</dt><dd>{formatBitrate(stats.bitrateKbps ?? undefined)}</dd><dt>Loss</dt><dd>{stats.packetLossPct == null ? '—' : `${stats.packetLossPct.toFixed(2)}%`}</dd><dt>Jitter</dt><dd>{formatMs(stats.jitterMs)}</dd><dt>Codec</dt><dd>{stats.codec?.toUpperCase() ?? '—'}</dd></dl></aside>;
+  return <aside className="stats-overlay" aria-label="Connection statistics"><div className="stats-title"><span className="vp-dot" data-tone="green" /> Live</div><dl><dt>Ping</dt><dd>{formatMs(stats.pingMs)}</dd><dt>Input</dt><dd>{formatMs(stats.inputLatencyMs)}</dd><dt>Video</dt><dd>{formatMs(stats.videoLatencyMs)}</dd><dt>Decoded</dt><dd>{stats.decodedFps?.toFixed(0) ?? '—'} FPS</dd><dt>Captured</dt><dd>{stats.agent?.captureFps?.toFixed(0) ?? '—'} FPS</dd><dt>Sent</dt><dd>{stats.agent?.sentFps?.toFixed(0) ?? '—'} FPS</dd><dt>Bitrate</dt><dd>{formatBitrate(stats.bitrateKbps ?? undefined)}</dd><dt>Loss</dt><dd>{stats.packetLossPct == null ? '—' : `${stats.packetLossPct.toFixed(2)}%`}</dd><dt>Jitter</dt><dd>{formatMs(stats.jitterMs)}</dd><dt>Codec</dt><dd>{stats.codec?.toUpperCase() ?? '—'}</dd><dt>Path</dt><dd>{state.link === 'usb' ? 'USB' : state.link === 'relay' ? 'Relais' : 'Wi-Fi'}</dd></dl></aside>;
 }
 
 function Metric({ label, value }: { label: string; value: string }) { return <div className="metric"><b>{value}</b><span>{label}</span></div>; }

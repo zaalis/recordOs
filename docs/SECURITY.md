@@ -5,7 +5,7 @@
 - A discovered device is untrusted.
 - A paired key is authorized only for its recorded permission level.
 - A trusted device may reconnect quickly, but session credentials remain temporary and revocable.
-- Remote Access is disabled by default and is not considered operational without a separately configured strong-authentication relay.
+- Remote Access is disabled by default. When enabled, the PC only makes an outbound, signed registration to the configured relay; the relay is untrusted for confidentiality and integrity (see [relay](RELAY.md)).
 
 ## Implemented controls
 
@@ -22,6 +22,10 @@
 - Secure, HttpOnly, SameSite=Strict session cookies; CSRF token and same-origin checks
 - CSP, clickjacking, MIME-sniffing, referrer and permissions headers
 - Bounded request bodies and account rate limiting
+- Relay: challenge-signed agent registration, optional access token, one-time accept tickets, per-source rate limits
+- Relay: TURN credentials delivered only inside the encrypted channel and restricted to the PC's leased virtual address; code-less pairing refused over the Internet
+- USB Direct: cable endpoints are announced only inside the encrypted channel or on the local `/api/info`; the iPad accepts only `wss://` to private IPv4 addresses and probes the pinned PC identity before use; the same authentication, pairing and DTLS-SRTP apply over the cable
+- USB Direct: a cable session offers only the cable address as ICE candidate; macOS needs no network or firewall change for the cable interface
 
 ## Secrets and local state
 
@@ -33,12 +37,13 @@ Agent state is stored below `~/Library/Application Support/Vision-Pro` (director
 - Terminate HTTPS at a trusted reverse proxy for the optional account server.
 - Keep registration disabled except during a controlled enrollment window.
 - Do not use `VP_INSECURE_DEV=1` outside loopback testing.
-- If the macOS application firewall is enabled, allow incoming connections for Vision-Pro only; keep stealth mode on for other services.
+- If the macOS application firewall is enabled, allow incoming connections for Vision-Pro only; keep stealth mode on for other services. A USB cable network needs no firewall or network-profile change on macOS.
+- The web app's Content Security Policy allows `wss://*:<agent port>` so the installed app (whose origin is the `.local` name) can reach the Mac through a cable address; scripts remain restricted to `'self'`.
 - Sign the app with a Developer ID, enable the Hardened Runtime and notarise it before distributing broadly; protect updates with a signed manifest.
 
 ## Known capability gates
 
-WebAuthn/passkeys, optional 2FA, an Internet relay, automated signed updates and third-party penetration testing are not complete in this repository. The UI and configuration do not claim those capabilities are active. They require deployment-specific origins, credentials, signing infrastructure and independent security validation.
+WebAuthn/passkeys, optional 2FA, automated signed updates and third-party penetration testing are not complete in this repository. The relay requires an operator-provided public host and certificate. The UI and configuration do not claim those capabilities are active. They require deployment-specific origins, credentials, signing infrastructure and independent security validation.
 
 Security issues should be handled privately; do not include live credentials, private keys or personal device identifiers in a public report.
 

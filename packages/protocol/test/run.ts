@@ -27,6 +27,12 @@ import {
   ALLOWED_VKS,
   VK,
   comboLabel,
+  relayConnectUrl,
+  cableSignalingUrl,
+  cableSignalingUrls,
+  ipadHotspotUrls,
+  probeAgent,
+  firstReachable,
 } from '../src/index.ts';
 
 const tests: [string, () => Promise<void> | void][] = [];
@@ -151,6 +157,66 @@ test('every built-in shortcut uses allowlisted Mac keys', () => {
   }
   assert.equal(comboLabel(['Cmd', 'Shift', 'Z']), '⇧⌘Z');
   assert.equal(comboLabel(['Control', 'Up']), '⌃↑');
+});
+
+test('relay signaling URLs are restricted to wss (ws only on loopback)', () => {
+  const id = 'AbCdEfGhIjKlMnOpQrStUv';
+  assert.equal(relayConnectUrl('wss://relay.example.com', id), `wss://relay.example.com/v1/connect/${id}`);
+  assert.equal(relayConnectUrl('wss://relay.example.com:8443/', id), `wss://relay.example.com:8443/v1/connect/${id}`);
+  assert.equal(relayConnectUrl('ws://127.0.0.1:8080', id), `ws://127.0.0.1:8080/v1/connect/${id}`);
+  assert.equal(relayConnectUrl('ws://relay.example.com', id), null);
+  assert.equal(relayConnectUrl('https://relay.example.com', id), null);
+  assert.equal(relayConnectUrl('wss://user:pass@relay.example.com', id), null);
+  assert.equal(relayConnectUrl('wss://relay.example.com', '../../x'), null);
+  assert.equal(relayConnectUrl('not a url', id), null);
+});
+
+test('cable signaling URLs only accept private IPv4 endpoints', () => {
+  assert.equal(cableSignalingUrl('wss://172.20.10.2:47800/ws'), 'wss://172.20.10.2:47800/ws');
+  assert.equal(cableSignalingUrl('wss://192.168.42.20:47800/ws'), 'wss://192.168.42.20:47800/ws');
+  assert.equal(cableSignalingUrl('ws://127.0.0.2:47802/ws'), 'ws://127.0.0.2:47802/ws');
+  assert.equal(cableSignalingUrl('ws://172.20.10.2:47800/ws'), null);
+  assert.equal(cableSignalingUrl('wss://8.8.8.8:47800/ws'), null);
+  assert.equal(cableSignalingUrl('wss://evil.example.com:47800/ws'), null);
+  assert.equal(cableSignalingUrl('wss://172.20.10.2/ws'), null);
+  assert.equal(cableSignalingUrl('wss://172.20.10.2:47800/other'), null);
+  assert.equal(cableSignalingUrl(42), null);
+  assert.deepEqual(cableSignalingUrls(['wss://172.20.10.2:47800/ws', 'wss://172.20.10.2:47800/ws', 'bad']), ['wss://172.20.10.2:47800/ws']);
+  assert.deepEqual(cableSignalingUrls('nope'), []);
+  assert.deepEqual(ipadHotspotUrls(47800), ['wss://172.20.10.2:47800/ws', 'wss://172.20.10.3:47800/ws', 'wss://172.20.10.4:47800/ws', 'wss://172.20.10.5:47800/ws']);
+});
+
+test('probing a signaling endpoint checks the Mac identity', async () => {
+  class FakeSocket {
+    static answers = new Map<string, string | null>();
+    onmessage: ((e: { data: string }) => void) | null = null;
+    onerror: (() => void) | null = null;
+    onclose: (() => void) | null = null;
+    closed = false;
+    constructor(url: string) {
+      const answer = FakeSocket.answers.get(url);
+      setTimeout(() => {
+        if (answer === undefined) return; // silent host: the probe must time out
+        if (answer === null) this.onerror?.();
+        else this.onmessage?.({ data: answer });
+      }, 5);
+    }
+    close() {
+      this.closed = true;
+    }
+  }
+  const id = 'AbCdEfGhIjKlMnOpQrStUv';
+  FakeSocket.answers.set('wss://a/ws', JSON.stringify({ t: 'hello', agentId: id }));
+  FakeSocket.answers.set('wss://b/ws', JSON.stringify({ t: 'hello', agentId: 'SomeoneElse0000000000x' }));
+  FakeSocket.answers.set('wss://c/ws', null);
+  const Impl = FakeSocket as unknown as typeof WebSocket;
+  assert.equal(await probeAgent('wss://a/ws', id, 200, Impl), true);
+  assert.equal(await probeAgent('wss://b/ws', id, 200, Impl), false);
+  assert.equal(await probeAgent('wss://c/ws', id, 200, Impl), false);
+  assert.equal(await probeAgent('wss://silent/ws', id, 50, Impl), false);
+  assert.equal(await firstReachable(['wss://silent/ws', 'wss://b/ws', 'wss://a/ws'], id, 100, Impl), 'wss://a/ws');
+  assert.equal(await firstReachable(['wss://silent/ws', 'wss://c/ws'], id, 50, Impl), null);
+  assert.equal(await firstReachable([], id, 50, Impl), null);
 });
 
 let failed = 0;

@@ -3,7 +3,8 @@
 //!   vp-agentd [--dev-loopback] [--connect]
 //!
 //! Pairing requests are printed to the console; type `y` or `n` and press Enter.
-//! Debug builds also accept `--approve-all` for automated end-to-end tests.
+//! Debug builds also accept `--approve-all` for automated end-to-end tests, and
+//! `--simulate-usb` (with `--dev-loopback`): a tablet "cable" on 127.0.0.2 that `u` plugs/unplugs.
 
 use std::io::BufRead;
 use std::sync::Arc;
@@ -43,6 +44,10 @@ fn main() -> anyhow::Result<()> {
         settings.advanced.developer_loopback = true;
         agent.update_settings(settings)?;
     }
+    let simulate_usb = cfg!(debug_assertions) && has("--simulate-usb");
+    if simulate_usb {
+        agent.simulate_usb(std::net::Ipv4Addr::new(127, 0, 0, 2));
+    }
     agent.start_service()?;
 
     let status = agent.status();
@@ -55,6 +60,12 @@ fn main() -> anyhow::Result<()> {
     if agent.settings().advanced.developer_loopback {
         println!(
             "  Dev       http://127.0.0.1:{}",
+            vp_agent::server::DEV_LOOPBACK_PORT
+        );
+    }
+    if simulate_usb {
+        println!(
+            "  USB       simulated cable ws://127.0.0.2:{}/ws — type u to unplug/plug",
             vp_agent::server::DEV_LOOPBACK_PORT
         );
     }
@@ -109,6 +120,18 @@ fn main() -> anyhow::Result<()> {
                         }
                     }
                     AgentEvent::PairingResolved { outcome, .. } => println!(">> pairing {outcome}"),
+                    AgentEvent::UsbChanged => {
+                        let usb = events_agent.status().usb;
+                        println!(
+                            ">> usb: {} device(s), links [{}]",
+                            usb.devices.len(),
+                            usb.links
+                                .iter()
+                                .map(|l| format!("{} {}", l.device_name, l.url))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        );
+                    }
                     AgentEvent::Audit(entry) => {
                         println!("   [{:?}] {}", entry.severity, entry.message)
                     }
@@ -134,6 +157,11 @@ fn main() -> anyhow::Result<()> {
             "d" => {
                 agent.disconnect_all();
             }
+            "u" => match agent.toggle_simulated_usb() {
+                Some(true) => println!(">> simulated USB cable plugged in"),
+                Some(false) => println!(">> simulated USB cable unplugged"),
+                None => println!(">> start with --simulate-usb to simulate a cable"),
+            },
             "s" => println!("{}", serde_json::to_string_pretty(&agent.status())?),
             _ => {}
         }

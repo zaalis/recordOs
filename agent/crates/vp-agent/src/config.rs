@@ -174,10 +174,14 @@ pub struct NetworkSettings {
     pub advertise_mdns: bool,
     /// Allow "Nearby computers → Connect" pairing requests without a code (confirmation on the Mac is still required).
     pub allow_nearby_pairing: bool,
-    /// Optional account/relay server, used only when signed in.
+    /// Vision-Pro relay used in Remote Access mode, normalized to `wss://host[:port]`.
     pub relay_url: Option<String>,
+    /// Access token required by private relays.
+    pub relay_token: Option<String>,
     /// STUN servers used only in Remote Access mode.
     pub stun_servers: Vec<String>,
+    /// Detect tablets plugged in with a cable and stream to them over that cable.
+    pub usb_direct: bool,
 }
 
 impl Default for NetworkSettings {
@@ -188,7 +192,9 @@ impl Default for NetworkSettings {
             advertise_mdns: true,
             allow_nearby_pairing: true,
             relay_url: None,
+            relay_token: None,
             stun_servers: vec![],
+            usb_direct: true,
         }
     }
 }
@@ -425,11 +431,18 @@ impl Settings {
         s.lockout_threshold = s.lockout_threshold.clamp(3, 20);
         s.lockout_minutes = s.lockout_minutes.clamp(1, 24 * 60);
         s.pairing_timeout_seconds = s.pairing_timeout_seconds.clamp(30, 600);
-        if let Some(url) = &self.network.relay_url {
-            if !url.starts_with("https://") {
-                self.network.relay_url = None;
-            }
-        }
+        self.network.relay_url = self
+            .network
+            .relay_url
+            .as_deref()
+            .and_then(crate::relay::normalize_url);
+        self.network.relay_token = self
+            .network
+            .relay_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| (16..=256).contains(&t.len()) && t.chars().all(|c| c.is_ascii_graphic()))
+            .map(str::to_string);
         self.network
             .stun_servers
             .retain(|s| s.starts_with("stun:") && s.len() < 256);
@@ -443,6 +456,35 @@ mod tests {
         BitrateMode, CodecSetting, FpsSetting, LatencyProfile, ResolutionMode, Settings,
         VideoSettings,
     };
+
+    #[test]
+    fn relay_settings_are_sanitized() {
+        let mut settings = Settings::default();
+        settings.network.relay_url = Some(" https://Relay.example.com/ ".into());
+        settings.network.relay_token = Some("short".into());
+        settings.sanitize();
+        assert_eq!(
+            settings.network.relay_url.as_deref(),
+            Some("wss://relay.example.com")
+        );
+        assert_eq!(settings.network.relay_token, None);
+        settings.network.relay_url = Some("ws://relay.example.com".into());
+        settings.network.relay_token = Some("0123456789abcdef".into());
+        settings.sanitize();
+        assert_eq!(settings.network.relay_url, None);
+        assert_eq!(
+            settings.network.relay_token.as_deref(),
+            Some("0123456789abcdef")
+        );
+    }
+
+    #[test]
+    fn usb_direct_is_on_by_default_and_for_older_settings_files() {
+        assert!(Settings::default().network.usb_direct);
+        let older: Settings =
+            serde_json::from_str(r#"{"network":{"mode":"local-only","httpsPort":47800}}"#).unwrap();
+        assert!(older.network.usb_direct);
+    }
 
     #[test]
     fn fresh_install_uses_responsive_video_quality() {

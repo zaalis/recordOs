@@ -6,7 +6,12 @@
 #import <ApplicationServices/ApplicationServices.h>
 #import <CoreMedia/CoreMedia.h>
 #import <CoreVideo/CoreVideo.h>
+#import <IOKit/IOKitLib.h>
 #import <IOKit/pwr_mgt/IOPMLib.h>
+#import <SystemConfiguration/SystemConfiguration.h>
+#include <ifaddrs.h>
+#include <net/if.h>
+#include <netinet/in.h>
 #import <ScreenCaptureKit/ScreenCaptureKit.h>
 #import <Security/Security.h>
 #import <VideoToolbox/VideoToolbox.h>
@@ -1026,4 +1031,191 @@ int32_t vp_keychain_delete(const char *service, const char *account) {
         if (!query) return errSecParam;
         return SecItemDelete((__bridge CFDictionaryRef)query);
     }
+}
+
+/* ============================================================================================ */
+/* USB Direct                                                                                   */
+/* ============================================================================================ */
+
+static uint32_t vp_registry_u32(io_registry_entry_t entry, CFStringRef key, bool *found) {
+    uint32_t value = 0;
+    CFTypeRef property = IORegistryEntryCreateCFProperty(entry, key, kCFAllocatorDefault, 0);
+    if (property) {
+        if (CFGetTypeID(property) == CFNumberGetTypeID() && CFNumberGetValue((CFNumberRef)property, kCFNumberSInt32Type, &value)) {
+            if (found) *found = true;
+        }
+        CFRelease(property);
+    }
+    return value;
+}
+
+static NSString *vp_registry_string(io_registry_entry_t entry, CFStringRef key) {
+    CFTypeRef property = IORegistryEntryCreateCFProperty(entry, key, kCFAllocatorDefault, 0);
+    if (!property) return nil;
+    NSString *value = nil;
+    if (CFGetTypeID(property) == CFStringGetTypeID()) value = [(__bridge NSString *)property copy];
+    CFRelease(property);
+    return value;
+}
+
+int32_t vp_usb_devices(vp_usb_device_t *out, int32_t capacity) {
+    if (!out || capacity <= 0) return 0;
+    int32_t written = 0;
+    @autoreleasepool {
+        io_iterator_t devices = IO_OBJECT_NULL;
+        if (IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("IOUSBHostDevice"), &devices) != KERN_SUCCESS) return 0;
+        io_service_t device;
+        while ((device = IOIteratorNext(devices))) {
+            if (written >= capacity) {
+                IOObjectRelease(device);
+                continue;
+            }
+            bool has_vendor = false, has_product = false;
+            uint32_t vendor = vp_registry_u32(device, CFSTR("idVendor"), &has_vendor);
+            uint32_t product = vp_registry_u32(device, CFSTR("idProduct"), &has_product);
+            if (has_vendor && has_product) {
+                vp_usb_device_t *entry = &out[written];
+                memset(entry, 0, sizeof *entry);
+                uint64_t registry_id = 0;
+                IORegistryEntryGetRegistryEntryID(device, &registry_id);
+                entry->registry_id = registry_id;
+                entry->vendor_id = (uint16_t)vendor;
+                entry->product_id = (uint16_t)product;
+                NSString *name = vp_registry_string(device, CFSTR("USB Product Name")) ?: vp_registry_string(device, CFSTR("kUSBProductString"));
+                vp_copy_string(name ?: @"", entry->name, sizeof entry->name);
+
+                io_iterator_t children = IO_OBJECT_NULL;
+                if (IORegistryEntryGetChildIterator(device, kIOServicePlane, &children) == KERN_SUCCESS) {
+                    io_registry_entry_t child;
+                    while ((child = IOIteratorNext(children))) {
+                        bool is_interface = false;
+                        uint32_t cls = vp_registry_u32(child, CFSTR("bInterfaceClass"), &is_interface);
+                        if (is_interface && entry->interface_count < 16) {
+                            uint8_t *triplet = entry->interfaces[entry->interface_count++];
+                            triplet[0] = (uint8_t)cls;
+                            triplet[1] = (uint8_t)vp_registry_u32(child, CFSTR("bInterfaceSubClass"), NULL);
+                            triplet[2] = (uint8_t)vp_registry_u32(child, CFSTR("bInterfaceProtocol"), NULL);
+                        }
+                        IOObjectRelease(child);
+                    }
+                    IOObjectRelease(children);
+                }
+                written++;
+            }
+            IOObjectRelease(device);
+        }
+        IOObjectRelease(devices);
+    }
+    return written;
+}
+
+bool vp_interface_usb(const char *bsd_name, uint16_t *vendor_id, uint16_t *product_id, char *display, size_t display_len) {
+    if (!bsd_name) return false;
+    bool found = false;
+    @autoreleasepool {
+        NSString *bsd = [NSString stringWithUTF8String:bsd_name];
+        if (!bsd) return false;
+        CFMutableDictionaryRef matching = IOServiceMatching("IONetworkInterface");
+        if (!matching) return false;
+        CFDictionarySetValue(matching, CFSTR("BSD Name"), (__bridge CFStringRef)bsd);
+        /* IOServiceGetMatchingService consumes the matching dictionary. */
+        io_service_t interface = IOServiceGetMatchingService(kIOMainPortDefault, matching);
+        if (interface == IO_OBJECT_NULL) return false;
+        /* Walk up the service plane to the USB device that provides this network function. */
+        io_registry_entry_t current = interface;
+        IOObjectRetain(current);
+        for (int depth = 0; depth < 12; depth++) {
+            bool has_vendor = false, has_product = false;
+            uint32_t vendor = vp_registry_u32(current, CFSTR("idVendor"), &has_vendor);
+            uint32_t product = vp_registry_u32(current, CFSTR("idProduct"), &has_product);
+            if (has_vendor && has_product && IOObjectConformsTo(current, "IOUSBHostDevice")) {
+                if (vendor_id) *vendor_id = (uint16_t)vendor;
+                if (product_id) *product_id = (uint16_t)product;
+                found = true;
+                break;
+            }
+            io_registry_entry_t parent = IO_OBJECT_NULL;
+            if (IORegistryEntryGetParentEntry(current, kIOServicePlane, &parent) != KERN_SUCCESS) break;
+            IOObjectRelease(current);
+            current = parent;
+        }
+        IOObjectRelease(current);
+        IOObjectRelease(interface);
+        if (!found) return false;
+
+        NSString *label = nil;
+        CFArrayRef all = SCNetworkInterfaceCopyAll();
+        if (all) {
+            for (CFIndex i = 0; i < CFArrayGetCount(all); i++) {
+                SCNetworkInterfaceRef item = (SCNetworkInterfaceRef)CFArrayGetValueAtIndex(all, i);
+                CFStringRef name = SCNetworkInterfaceGetBSDName(item);
+                if (name && CFStringCompare(name, (__bridge CFStringRef)bsd, 0) == kCFCompareEqualTo) {
+                    CFStringRef display_name = SCNetworkInterfaceGetLocalizedDisplayName(item);
+                    if (display_name) label = [(__bridge NSString *)display_name copy];
+                    break;
+                }
+            }
+            CFRelease(all);
+        }
+        vp_copy_string(label ?: bsd, display, display_len);
+    }
+    return found;
+}
+
+uint32_t vp_interface_index(const char *bsd_name) {
+    return bsd_name ? if_nametoindex(bsd_name) : 0;
+}
+
+uint32_t vp_primary_interface_index(void) {
+    uint32_t index = 0;
+    @autoreleasepool {
+        SCDynamicStoreRef store = SCDynamicStoreCreate(kCFAllocatorDefault, CFSTR("Vision-Pro"), NULL, NULL);
+        if (!store) return 0;
+        CFPropertyListRef global = SCDynamicStoreCopyValue(store, CFSTR("State:/Network/Global/IPv4"));
+        if (global) {
+            if (CFGetTypeID(global) == CFDictionaryGetTypeID()) {
+                CFStringRef primary = CFDictionaryGetValue((CFDictionaryRef)global, CFSTR("PrimaryInterface"));
+                if (primary && CFGetTypeID(primary) == CFStringGetTypeID()) {
+                    char name[IFNAMSIZ] = {0};
+                    if (CFStringGetCString(primary, name, sizeof name, kCFStringEncodingUTF8)) index = if_nametoindex(name);
+                }
+            }
+            CFRelease(global);
+        }
+        CFRelease(store);
+    }
+    return index;
+}
+
+uint64_t vp_network_signature(void) {
+    uint64_t hash = 1469598103934665603ULL;
+    struct ifaddrs *list = NULL;
+    if (getifaddrs(&list) == 0) {
+        for (struct ifaddrs *item = list; item; item = item->ifa_next) {
+            if (!item->ifa_addr || item->ifa_addr->sa_family != AF_INET) continue;
+            uint32_t address = ((struct sockaddr_in *)item->ifa_addr)->sin_addr.s_addr;
+            for (const char *c = item->ifa_name; c && *c; c++) {
+                hash ^= (uint8_t)*c;
+                hash *= 1099511628211ULL;
+            }
+            hash ^= address;
+            hash *= 1099511628211ULL;
+            hash ^= (uint64_t)(item->ifa_flags & IFF_UP);
+            hash *= 1099511628211ULL;
+        }
+        freeifaddrs(list);
+    }
+    io_iterator_t devices = IO_OBJECT_NULL;
+    if (IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("IOUSBHostDevice"), &devices) == KERN_SUCCESS) {
+        io_service_t device;
+        while ((device = IOIteratorNext(devices))) {
+            uint64_t registry_id = 0;
+            IORegistryEntryGetRegistryEntryID(device, &registry_id);
+            hash ^= registry_id;
+            hash *= 1099511628211ULL;
+            IOObjectRelease(device);
+        }
+        IOObjectRelease(devices);
+    }
+    return hash;
 }

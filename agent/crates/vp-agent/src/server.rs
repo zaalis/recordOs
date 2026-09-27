@@ -7,7 +7,7 @@
 use crate::agent::Core;
 use crate::config::NetworkMode;
 use crate::security::{Severity, Verdict};
-use crate::signaling::{self, SignalTransport};
+use crate::signaling::{self, Route, SignalTransport};
 use axum::body::Body;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, State};
@@ -15,6 +15,7 @@ use axum::http::{header, HeaderMap, HeaderValue, Request, Response, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::IntoResponse;
 use axum::routing::get;
+use axum::Extension;
 use axum::{Json, Router};
 use hyper_util::rt::TokioIo;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -37,6 +38,10 @@ struct WebAssets;
 pub struct ServerHandle {
     shutdown: watch::Sender<bool>,
 }
+
+/// Local address a connection arrived on (a Wi-Fi address, or a USB cable address).
+#[derive(Clone, Copy)]
+pub struct LocalAddr(pub SocketAddr);
 
 impl Drop for ServerHandle {
     fn drop(&mut self) {
@@ -66,6 +71,16 @@ pub async fn start(core: Arc<Core>) -> anyhow::Result<ServerHandle> {
             }
             Err(error) => tracing::warn!(%error, "developer loopback unavailable"),
         }
+        // A simulated cable (tests) is another loopback address with its own listener.
+        let simulated = core.usb_simulation.read().map(|s| s.ip);
+        if let Some(ip) = simulated.filter(|ip| ip.is_loopback() && *ip != Ipv4Addr::LOCALHOST) {
+            match TcpListener::bind(SocketAddr::from((ip, DEV_LOOPBACK_PORT))).await {
+                Ok(dev) => {
+                    tokio::spawn(accept_loop(core.clone(), dev, false, rx.clone()));
+                }
+                Err(error) => tracing::warn!(%error, "simulated USB listener unavailable"),
+            }
+        }
     }
     Ok(ServerHandle { shutdown })
 }
@@ -87,7 +102,8 @@ pub async fn start_bootstrap(core: Arc<Core>) -> anyhow::Result<ServerHandle> {
                         continue;
                     }
                     let router = router.clone();
-                    tokio::spawn(serve_http(TokioIo::new(stream), peer, router, false));
+                    let local = stream.local_addr().unwrap_or(SocketAddr::from((Ipv4Addr::UNSPECIFIED, BOOTSTRAP_PORT)));
+                    tokio::spawn(serve_http(TokioIo::new(stream), peer, local, router, false));
                 }
             }
         }
@@ -136,6 +152,9 @@ async fn accept_loop(
             continue;
         }
         let _ = stream.set_nodelay(true);
+        let Ok(local) = stream.local_addr() else {
+            continue;
+        };
         let router = router.clone();
         if tls {
             let Some(config) = core.tls.read().clone() else {
@@ -146,21 +165,27 @@ async fn accept_loop(
                 if let Ok(Ok(tls_stream)) =
                     tokio::time::timeout(Duration::from_secs(10), acceptor.accept(stream)).await
                 {
-                    serve_http(TokioIo::new(tls_stream), peer, router, true).await
+                    serve_http(TokioIo::new(tls_stream), peer, local, router, true).await
                 }
             });
         } else {
-            tokio::spawn(serve_http(TokioIo::new(stream), peer, router, false));
+            tokio::spawn(serve_http(TokioIo::new(stream), peer, local, router, false));
         }
     }
 }
 
-async fn serve_http<I>(io: TokioIo<I>, peer: SocketAddr, router: Router, _tls: bool)
-where
+async fn serve_http<I>(
+    io: TokioIo<I>,
+    peer: SocketAddr,
+    local: SocketAddr,
+    router: Router,
+    _tls: bool,
+) where
     I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
     let service = hyper::service::service_fn(move |mut request: Request<hyper::body::Incoming>| {
         request.extensions_mut().insert(ConnectInfo(peer));
+        request.extensions_mut().insert(LocalAddr(local));
         let router = router.clone();
         async move { router.oneshot(request.map(Body::new)).await }
     });
@@ -173,21 +198,38 @@ where
 }
 
 fn app_router(core: Arc<Core>, tls: bool) -> Router {
+    let relay_core = core.clone();
     Router::new()
         .route("/ws", get(ws_handler))
         .route("/api/info", get(info_handler))
         .route("/api/nearby", get(nearby_handler))
         .fallback(get(static_handler))
         .layer(middleware::from_fn(move |req, next| {
-            security_headers(req, next, if tls { Policy::App } else { Policy::DevApp })
+            // The cached iPad app keeps this policy while away from home, so it must already allow
+            // the configured relay.
+            let (relay, port) = {
+                let settings = relay_core.settings.read();
+                (
+                    settings.network.relay_url.clone(),
+                    settings.network.https_port,
+                )
+            };
+            let policy = if tls {
+                Policy::App(relay, port)
+            } else {
+                Policy::DevApp(relay, DEV_LOOPBACK_PORT)
+            };
+            security_headers(req, next, policy)
         }))
         .with_state(core)
 }
 
 #[derive(Clone)]
 enum Policy {
-    App,
-    DevApp,
+    /// Web app; the port is the agent's signaling port on any address, because the installed app
+    /// keeps its `.local` origin while it reaches the Mac through a cable address.
+    App(Option<String>, u16),
+    DevApp(Option<String>, u16),
     Bootstrap(String),
 }
 
@@ -205,9 +247,14 @@ async fn security_headers(request: Request<Body>, next: Next, policy: Policy) ->
     let mut response = next.run(request).await;
     let headers = response.headers_mut();
     let csp = match &policy {
-        Policy::App | Policy::DevApp => {
-            let ws_scheme = if matches!(policy, Policy::App) { "wss" } else { "ws" };
-            let connect = host.map(|h| format!(" {ws_scheme}://{h}")).unwrap_or_default();
+        Policy::App(relay, port) | Policy::DevApp(relay, port) => {
+            let ws_scheme = if matches!(policy, Policy::App(..)) { "wss" } else { "ws" };
+            let mut connect = host.map(|h| format!(" {ws_scheme}://{h}")).unwrap_or_default();
+            connect.push_str(&format!(" {ws_scheme}://*:{port}"));
+            if let Some(relay) = relay {
+                connect.push(' ');
+                connect.push_str(relay);
+            }
             format!(
                 "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; \
                  connect-src 'self'{connect}; worker-src 'self'; manifest-src 'self'; font-src 'self' data:; object-src 'none'; \
@@ -274,6 +321,7 @@ async fn ws_handler(
     ws: WebSocketUpgrade,
     State(core): State<Arc<Core>>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Extension(LocalAddr(local)): Extension<LocalAddr>,
     headers: HeaderMap,
 ) -> Response<Body> {
     if let Some(origin) = headers.get(header::ORIGIN) {
@@ -291,7 +339,15 @@ async fn ws_handler(
     }
     ws.max_message_size(MAX_WS_MESSAGE)
         .max_frame_size(MAX_WS_MESSAGE)
-        .on_upgrade(move |socket| signaling::run(core, AxumTransport(socket), peer.ip()))
+        .on_upgrade(move |socket| {
+            signaling::run(
+                core,
+                AxumTransport(socket),
+                peer.ip(),
+                Route::Direct,
+                Some(local.ip()),
+            )
+        })
 }
 
 struct AxumTransport(WebSocket);
@@ -333,6 +389,7 @@ async fn info_handler(State(core): State<Arc<Core>>) -> impl IntoResponse {
         "hostname": core.hostname,
         "port": settings.network.https_port,
         "pairing": { "nearby": settings.network.allow_nearby_pairing },
+        "usb": { "urls": core.usb.read().urls() },
     });
     ([(header::CACHE_CONTROL, "no-store")], Json(body))
 }

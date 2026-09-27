@@ -79,6 +79,7 @@ pub fn display_infos(outputs: &[Output]) -> Vec<DisplayInfo> {
 
 pub fn spawn(
     config: PipelineConfig,
+    video: tokio::sync::mpsc::Sender<EncodedVideo>,
     events: tokio::sync::mpsc::Sender<PipelineEvent>,
     commands: Receiver<PipelineCommand>,
     display_rect: SharedRect,
@@ -88,7 +89,7 @@ pub fn spawn(
         .name("vp-capture".into())
         .spawn(move || {
             let _wake = config.prevent_sleep.then(super::system::WakeLock::acquire);
-            run(config, events, commands, display_rect, stats);
+            run(config, video, events, commands, display_rect, stats);
         })
         .expect("capture thread")
 }
@@ -134,6 +135,7 @@ fn build_encoder(
 
 fn run(
     mut config: PipelineConfig,
+    video_out: tokio::sync::mpsc::Sender<EncodedVideo>,
     events: tokio::sync::mpsc::Sender<PipelineEvent>,
     commands: Receiver<PipelineCommand>,
     display_rect: SharedRect,
@@ -272,7 +274,7 @@ fn run(
                     }
                 }
             }
-            if commands.is_empty() && events.is_closed() {
+            if commands.is_empty() && video_out.is_closed() {
                 return;
             }
 
@@ -355,7 +357,8 @@ fn run(
                         captured_at,
                         rtp_time,
                     };
-                    if events.try_send(PipelineEvent::Video(video)).is_err() {
+                    // Video has its own two-slot queue; cursor and control events never take it.
+                    if video_out.try_send(video).is_err() {
                         // The network side is congested: the next frame must be a keyframe.
                         force_keyframe = true;
                     }

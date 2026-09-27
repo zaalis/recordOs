@@ -37,5 +37,10 @@ pub enum AgentEvent {
     DevicesChanged,
     SettingsChanged,
     ConnectWindowChanged,
+    RelayChanged,
+    /// A tablet or a cable network interface appeared or disappeared.
+    UsbChanged,
+    /// This Mac's local addresses changed (certificate and discovery were refreshed).
+    NetworkChanged,
     Audit(AuditEntry),
 }

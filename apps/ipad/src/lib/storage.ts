@@ -15,6 +15,10 @@ export interface KnownComputer {
   port: number;
   pairedAt: number;
   lastConnectedAt: number | null;
+  /** Relay announced by this Mac during its last session; used when the Mac is not on this network. */
+  relayUrl?: string;
+  /** USB cable endpoints this Mac announced; tried when the Mac is not reachable over Wi-Fi. */
+  usbUrls?: string[];
 }
 
 export type ControlMode = 'direct' | 'trackpad' | 'pencil';

@@ -19,6 +19,7 @@ pub mod permissions;
 pub mod pipeline;
 pub mod sw_encoder;
 pub mod system;
+pub mod usb;
 pub mod vt_encoder;
 
 use crate::media::MediaEngine;

@@ -17,7 +17,8 @@ export function ConnectionOverlay() {
     }
   }, [state.phase]);
 
-  if (state.phase === 'idle' || state.phase === 'streaming') return null;
+  // Moving an ongoing session onto a USB cable keeps the picture on screen, without an overlay.
+  if (state.phase === 'idle' || state.phase === 'streaming' || state.switching) return null;
 
   if (state.phase === 'ended') {
     return null;

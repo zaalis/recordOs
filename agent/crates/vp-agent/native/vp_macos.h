@@ -165,6 +165,32 @@ int32_t vp_keychain_get(const char *service, const char *account, uint8_t *out, 
 int32_t vp_keychain_set(const char *service, const char *account, const uint8_t *data, size_t len);
 int32_t vp_keychain_delete(const char *service, const char *account);
 
+/* ------------------------------------------------------------------------------------------ */
+/* USB Direct (tablet network over the cable)                                                 */
+/* ------------------------------------------------------------------------------------------ */
+
+typedef struct {
+    uint64_t registry_id;     /* IORegistry entry id, stable while the device stays plugged */
+    uint16_t vendor_id;
+    uint16_t product_id;
+    char name[128];           /* USB product string: "iPad", "Galaxy Tab S9" */
+    uint8_t interfaces[16][3]; /* (class, subclass, protocol) of each USB function */
+    uint32_t interface_count;
+} vp_usb_device_t;
+
+/* Present USB devices (IOUSBHostDevice). Returns the number written. */
+int32_t vp_usb_devices(vp_usb_device_t *out, int32_t capacity);
+/* When BSD interface `bsd_name` (e.g. "en7") is provided by a USB device, fills its ids and the
+ * interface's display name ("iPad USB") and returns true. */
+bool vp_interface_usb(const char *bsd_name, uint16_t *vendor_id, uint16_t *product_id, char *display,
+                      size_t display_len);
+/* Index of the interface carrying the default IPv4 route (0 when unknown). */
+uint32_t vp_primary_interface_index(void);
+/* Interface index of a BSD name (0 when unknown). */
+uint32_t vp_interface_index(const char *bsd_name);
+/* Changes whenever USB devices or IPv4 addresses change (cheap; used to wake the monitor). */
+uint64_t vp_network_signature(void);
+
 #ifdef __cplusplus
 }
 #endif

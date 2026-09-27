@@ -106,6 +106,7 @@ impl MediaEngine for MacMediaEngine {
         }
         let settings = context.settings.clone();
         let offer = request.offer;
+        let relay = request.relay;
         let video = if settings.streaming.allow_client_overrides {
             offer.video
         } else {
@@ -138,25 +139,39 @@ impl MediaEngine for MacMediaEngine {
         let fps = codec::resolve_fps(&video, output.refresh_hz, offer.display.refresh_hz);
         let kbps = codec::resolve_bitrate(&video, size, fps, choice.codec);
 
-        let mut ips: Vec<std::net::Ipv4Addr> = crate::net::lan_interfaces()
-            .into_iter()
-            .map(|i| i.ip)
-            .collect();
-        if settings.advanced.developer_loopback || ips.is_empty() {
+        // A relayed iPad only has TURN candidates: LAN host candidates would never be reachable.
+        // A cable session offers the cable address alone, so video and input never leave it; a
+        // local-network session never offers a cable address.
+        let mut ips: Vec<std::net::Ipv4Addr> = match (&relay, request.bind) {
+            (Some(_), _) => vec![],
+            (None, Some(cable)) => vec![cable],
+            (None, None) => crate::net::lan_interfaces()
+                .into_iter()
+                .map(|i| i.ip)
+                .filter(|ip| !request.exclude.contains(ip))
+                .collect(),
+        };
+        if relay.is_none()
+            && request.bind.is_none()
+            && (settings.advanced.developer_loopback || ips.is_empty())
+        {
             ips.push(std::net::Ipv4Addr::LOCALHOST);
         }
         if settings.network.mode == NetworkMode::LocalOnly {
             ips.retain(|ip| crate::net::is_local_address((*ip).into()));
         }
-        let negotiated = rtc::negotiate(&offer.sdp, choice.codec, &ips, kbps)?;
+        let negotiated = rtc::negotiate(&offer.sdp, choice.codec, &ips, kbps, relay)?;
         let answer_sdp = negotiated.answer.clone();
 
         let display_rect = Arc::new(RwLock::new(output.bounds));
         let injector = InjectorHandle::spawn(display_rect.clone(), rtc::input_policy(&settings));
         // Keep at most two encoded frames waiting for the network task. Under
         // congestion, newer video replaces stale video instead of increasing
-        // what the user perceives as pointer-to-image latency.
-        let (events_tx, events_rx) = tokio::sync::mpsc::channel(2);
+        // what the user perceives as pointer-to-image latency. Cursor and control
+        // events have their own queue: sharing the two video slots with cursor
+        // updates dropped frames (and forced keyframes) whenever the pointer moved.
+        let (video_tx, video_rx) = tokio::sync::mpsc::channel(2);
+        let (events_tx, events_rx) = tokio::sync::mpsc::channel(64);
         let (commands_tx, commands_rx) = crossbeam_channel::unbounded();
         let stats = Arc::new(Mutex::new(PipelineStats::default()));
         let initial_bitrate_kbps = rtc::initial_bwe_kbps(kbps);
@@ -171,6 +186,7 @@ impl MediaEngine for MacMediaEngine {
                 prevent_sleep: settings.display.prevent_sleep,
                 initial_bitrate_kbps,
             },
+            video_tx,
             events_tx,
             commands_rx,
             display_rect,
@@ -180,6 +196,7 @@ impl MediaEngine for MacMediaEngine {
         let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
         let rtc_context = RtcContext {
             codec: choice.codec,
+            video: video_rx,
             events: events_rx,
             pipeline: commands_tx.clone(),
             injector: injector.sender.clone(),

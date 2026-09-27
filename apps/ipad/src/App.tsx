@@ -30,7 +30,7 @@ export function App() {
 
   // Remember and pin every Mac this iPad successfully connects to.
   useEffect(() => {
-    connection.onPaired = ({ agentId, name, fingerprint }) => {
+    connection.onPaired = ({ agentId, name, fingerprint, relayUrl, usbUrls }) => {
       const { agent, computers } = store.get();
       const existing = computers.find((c) => c.agentId === agentId);
       void rememberComputer({
@@ -41,6 +41,10 @@ export function App() {
         port: agent?.agentId === agentId ? agent.port : (existing?.port ?? Number(location.port || 443)),
         pairedAt: existing?.pairedAt ?? Date.now(),
         lastConnectedAt: Date.now(),
+        // Every session reports the Mac's current relay; an absent value means remote access is off.
+        ...(relayUrl ? { relayUrl } : {}),
+        // Cable endpoints stay valid across sessions (the tablet gives the Mac the same address).
+        ...(usbUrls.length ? { usbUrls } : existing?.usbUrls ? { usbUrls: existing.usbUrls } : {}),
       });
     };
     connection.onAccessRemoved = (agentId) => {

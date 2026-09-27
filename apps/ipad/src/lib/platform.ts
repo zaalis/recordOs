@@ -10,6 +10,8 @@ export interface AgentInfo {
   hostname: string;
   port: number;
   pairing: { nearby: boolean };
+  /** Cable endpoints of the Mac right now (a tablet connected by USB). */
+  usb?: { urls: string[] };
 }
 
 export interface NearbyAgent {

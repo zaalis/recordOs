@@ -60,6 +60,7 @@ export type IconName =
   | 'camera'
   | 'hand'
   | 'arrow-up'
+  | 'cable'
   | 'dots';
 
 const paths: Record<IconName, ReactElement> = {
@@ -249,6 +250,7 @@ const paths: Record<IconName, ReactElement> = {
   ),
   hand: <path d="M8 12.5V6a1.5 1.5 0 0 1 3 0v5.5-7a1.5 1.5 0 0 1 3 0v7-5a1.5 1.5 0 0 1 3 0v8a7 7 0 0 1-7 7h-.5A6.5 6.5 0 0 1 4 16l-.8-3a1.5 1.5 0 0 1 2.7-1.2L8 14.5" />,
   'arrow-up': <path d="M12 19V5M5.5 11.5 12 5l6.5 6.5" />,
+  cable: <path d="M10 2.5h4v3h-4zM8.5 5.5h7v4.5a2 2 0 0 1-2 2h-3a2 2 0 0 1-2-2zM12 12v3a3 3 0 0 1-3 3H7.5a2 2 0 0 0-2 2v1.5" />,
   dots: <path d="M5 12h.01M12 12h.01M19 12h.01" strokeWidth="3" />,
 };
 

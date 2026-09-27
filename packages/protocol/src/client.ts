@@ -233,3 +233,68 @@ export class SignalingClient {
     }
   }
 }
+
+/**
+ * Checks that a signaling endpoint answers with the expected Mac, without authenticating: the
+ * handshake stops after the agent's plaintext `hello`. Used to pick a USB cable path before
+ * connecting (only the tablet at the other end of the cable can reach a cable address).
+ */
+export function probeAgent(url: string, agentId: string, timeoutMs = 1500, WebSocketImpl: typeof WebSocket = WebSocket): Promise<boolean> {
+  return new Promise((resolve) => {
+    let socket: WebSocket | undefined;
+    let settled = false;
+    const finish = (ok: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (socket) {
+        socket.onmessage = socket.onerror = socket.onclose = null;
+        try {
+          socket.close();
+        } catch {
+          /* already closed */
+        }
+      }
+      resolve(ok);
+    };
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    try {
+      socket = new WebSocketImpl(url);
+    } catch {
+      finish(false);
+      return;
+    }
+    socket.onmessage = (event: MessageEvent) => {
+      try {
+        const hello = JSON.parse(String(event.data)) as { t?: unknown; agentId?: unknown };
+        finish(hello.t === 'hello' && hello.agentId === agentId);
+      } catch {
+        finish(false);
+      }
+    };
+    socket.onerror = () => finish(false);
+    socket.onclose = () => finish(false);
+  });
+}
+
+/** First endpoint (in list order of answers) that reaches the expected Mac, or null. */
+export function firstReachable(urls: string[], agentId: string, timeoutMs = 1500, WebSocketImpl: typeof WebSocket = WebSocket): Promise<string | null> {
+  if (!urls.length) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    let pending = urls.length;
+    let settled = false;
+    for (const url of urls) {
+      void probeAgent(url, agentId, timeoutMs, WebSocketImpl).then((ok) => {
+        pending -= 1;
+        if (settled) return;
+        if (ok) {
+          settled = true;
+          resolve(url);
+        } else if (pending === 0) {
+          settled = true;
+          resolve(null);
+        }
+      });
+    }
+  });
+}

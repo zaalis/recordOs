@@ -22,6 +22,13 @@ const french: Record<string, string> = {
   'is controlling': 'contrôle', 'is viewing': 'visualise', 'this Mac.': 'ce Mac.', 'controlling': 'contrôle', 'viewing': 'visualise',
   'Apple Pencil': 'Apple Pencil', 'Keyboard and shortcuts': 'Clavier et raccourcis', 'Mouse and trackpad': 'Souris et trackpad', 'Detect active app': 'Détecter l’application active',
   'minutes': 'minutes', 'days': 'jours', 'attempts': 'tentatives', 'blocked source': 'source bloquée', 'blocked sources': 'sources bloquées',
+  'Off': 'Désactivé', 'Unreachable': 'Injoignable', 'Connecting': 'Connexion', 'Relay': 'Relais', 'Relay address': 'Adresse du relais', 'Access token': 'Jeton d’accès', 'Optional': 'Facultatif', 'Save': 'Enregistrer',
+  'Reachable from the Internet': 'Joignable depuis Internet', 'Relay unreachable': 'Relais injoignable', 'Connecting to the relay…': 'Connexion au relais…', 'Relay inactive': 'Relais inactif',
+  'Encrypted media over UDP': 'Flux chiffré via UDP', 'Encrypted media over TCP (UDP blocked)': 'Flux chiffré via TCP (UDP bloqué)', 'Save to connect': 'Enregistrez pour vous connecter', 'Enter your relay address': 'Saisissez l’adresse de votre relais',
+  'Local Only never exposes the Mac to the Internet. Remote Access goes through your own relay, with end-to-end encryption.': 'Le mode local n’expose jamais le Mac à Internet. L’accès distant passe par votre propre relais, avec un chiffrement de bout en bout.',
+  'Reach this Mac from any network through a Vision-Pro relay. The relay never sees your screen or keystrokes.': 'Accédez à ce Mac depuis n’importe quel réseau via un relais Vision-Pro. Le relais ne voit jamais votre écran ni vos frappes.',
+  'Pair each iPad once on the local network. It then connects from anywhere: the Mac key is pinned, pairing codes are always required through the relay, and video stays DTLS-SRTP encrypted.': 'Associez chaque iPad une fois sur le réseau local. Il se connecte ensuite depuis n’importe où : la clé du Mac est épinglée, un code d’association est toujours exigé via le relais et la vidéo reste chiffrée en DTLS-SRTP.',
+  'Enter the relay address, for example relay.example.com.': 'Saisissez l’adresse du relais, par exemple relay.exemple.com.', 'The access token must contain at least 16 characters.': 'Le jeton d’accès doit contenir au moins 16 caractères.',
   'Vision-Pro uses a direct encrypted WebRTC path on the local network. Video does not transit through a cloud service in Local Only mode.': 'Vision-Pro utilise un chemin WebRTC chiffré et direct sur le réseau local. La vidéo ne transite par aucun service cloud en mode Local uniquement.',
   'Open Vision-Pro on your iPad.': 'Ouvrez Vision-Pro sur votre iPad.', 'Scan this QR code or enter the code below.': 'Scannez ce code QR ou saisissez le code ci-dessous.', 'Confirm the matching security code on this Mac.': 'Confirmez le code de sécurité correspondant sur ce Mac.',
   'This Mac grants no control until you explicitly approve the request.': 'Ce Mac n’accorde aucun contrôle tant que vous n’approuvez pas explicitement la demande.',
@@ -33,12 +40,25 @@ const french: Record<string, string> = {
   'Allowed': 'Autorisé', 'Allow…': 'Autoriser…', 'Review': 'Vérifier', 'macOS permission needed:': 'Autorisation macOS requise :',
 };
 
+function relative(value: string): string {
+  return value
+    .replace(/^Just now$/, 'à l’instant')
+    .replace(/^(\d+) min ago$/, 'il y a $1 min')
+    .replace(/^(\d+) h ago$/, 'il y a $1 h')
+    .replace(/^(\d+) d ago$/, 'il y a $1 j');
+}
+
 function translate(value: string): string {
   const direct = french[value];
   if (direct) return direct;
-  return value
+  const connected = /^Last connected (.+)$/.exec(value);
+  if (connected) return `Dernière connexion ${relative(connected[1]!)}`;
+  const expires = /^Expires (.+)$/.exec(value);
+  if (expires) return `Expire ${relative(expires[1]!)}`;
+  return relative(value)
     .replace(/^(\d+) trusted$/, '$1 de confiance')
     .replace(/^(\d+) FPS sent$/, '$1 FPS envoyées')
+    .replace(/ · via relay$/, ' · via le relais')
     .replace(/^macOS permission needed: /, 'Autorisation macOS requise : ');
 }
 

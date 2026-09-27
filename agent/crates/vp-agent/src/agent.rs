@@ -7,6 +7,7 @@ use crate::identity::AgentIdentity;
 use crate::media::MediaEngine;
 use crate::pairing::PairingManager;
 use crate::protocol::AgentCaps;
+use crate::relay::{RelayHub, RelayStatus};
 use crate::security::{AuditEntry, AuditLog, Guard, Severity};
 use crate::server::{self, ServerHandle};
 use crate::session::{EndReason, SessionInfo, SessionRegistry};
@@ -37,18 +38,34 @@ pub struct Core {
     pub tls: RwLock<Option<Arc<rustls::ServerConfig>>>,
     pub cert_ips: RwLock<Vec<Ipv4Addr>>,
     pub nearby: Arc<RwLock<Vec<NearbyAgent>>>,
+    pub relay: Arc<RelayHub>,
+    /// Running mDNS announcement, updated when this Mac's addresses change.
+    pub discovery: RwLock<Option<Arc<Discovery>>>,
+    /// Tablets and cable links currently detected (USB Direct).
+    pub usb: RwLock<crate::usb::UsbStatus>,
+    pub usb_wake: Mutex<Option<crossbeam_channel::Sender<crate::usb::Wake>>>,
+    pub usb_simulation: RwLock<Option<crate::usb::Simulation>>,
+    /// Set after a firewall change so the next scan does not reuse a cached diagnosis.
+    pub usb_diagnostics_stale: std::sync::atomic::AtomicBool,
+    network_refresh: Mutex<()>,
 }
 
 struct Service {
+    // Dropped first: the monitor must stop before discovery and the servers go away.
+    _usb: crate::usb::Monitor,
     _server: ServerHandle,
-    _discovery: Option<Discovery>,
+    _discovery: Option<Arc<Discovery>>,
     maintenance: tokio::task::JoinHandle<()>,
+    relay: Option<tokio::sync::watch::Sender<bool>>,
     started_at: u64,
 }
 
 impl Drop for Service {
     fn drop(&mut self) {
         self.maintenance.abort();
+        if let Some(relay) = &self.relay {
+            let _ = relay.send(true);
+        }
     }
 }
 
@@ -65,6 +82,7 @@ pub struct StatusSnapshot {
     pub port: u16,
     pub addresses: Vec<String>,
     pub network_mode: crate::config::NetworkMode,
+    pub relay: RelayStatus,
     pub sessions: Vec<SessionInfo>,
     pub pending_pairing: Option<PairingRequestInfo>,
     pub connect_window_open: bool,
@@ -72,6 +90,7 @@ pub struct StatusSnapshot {
     pub locked_sources: usize,
     pub store_integrity_warning: bool,
     pub version: String,
+    pub usb: crate::usb::UsbStatus,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -144,6 +163,13 @@ impl Agent {
             tls: RwLock::new(None),
             cert_ips: RwLock::new(vec![]),
             nearby: Arc::new(RwLock::new(vec![])),
+            relay: Arc::new(RelayHub::default()),
+            discovery: RwLock::new(None),
+            usb: RwLock::new(crate::usb::UsbStatus::default()),
+            usb_wake: Mutex::new(None),
+            usb_simulation: RwLock::new(None),
+            usb_diagnostics_stale: std::sync::atomic::AtomicBool::new(false),
+            network_refresh: Mutex::new(()),
         });
 
         // Forward audit entries to UI observers.
@@ -183,7 +209,7 @@ impl Agent {
         self.service.lock().is_some()
     }
 
-    fn refresh_certificate(core: &Core) -> anyhow::Result<()> {
+    pub(crate) fn refresh_certificate(core: &Core) -> anyhow::Result<()> {
         let name = core.settings.read().computer_name.clone();
         let authority = match core.authority.read().clone() {
             Some(a) => a,
@@ -226,14 +252,33 @@ impl Agent {
                 )
                 .map_err(|e| tracing::warn!(error = %e, "mDNS unavailable"))
                 .ok()
+                .map(Arc::new)
             } else {
                 None
             };
+            *core.discovery.write() = discovery.clone();
+            // Detects tablets on the USB bus and keeps addresses fresh (Wi-Fi changes, cables).
+            let usb = crate::usb::Monitor::start(core.clone());
             let maintenance = tokio::spawn(maintenance_loop(core.clone()));
+            let relay = match (&settings.network.mode, &settings.network.relay_url) {
+                (crate::config::NetworkMode::RemoteAccess, Some(url)) => {
+                    let (stop, stopped) = tokio::sync::watch::channel(false);
+                    tokio::spawn(crate::relay::run(
+                        core.clone(),
+                        url.clone(),
+                        settings.network.relay_token.clone(),
+                        stopped,
+                    ));
+                    Some(stop)
+                }
+                _ => None,
+            };
             Ok(Service {
+                _usb: usb,
                 _server: server,
                 _discovery: discovery,
                 maintenance,
+                relay,
                 started_at: now_ms(),
             })
         });
@@ -273,9 +318,13 @@ impl Agent {
         self.close_connect_window();
         let stopped = {
             let _guard = self.runtime.enter();
-            self.service.lock().take()
+            let service = self.service.lock().take();
+            *self.core.discovery.write() = None;
+            let was_running = service.is_some();
+            drop(service);
+            was_running
         };
-        if stopped.is_some() {
+        if stopped {
             self.core.audit.record(
                 Severity::Info,
                 "service.stopped",
@@ -312,6 +361,7 @@ impl Agent {
             port,
             addresses,
             network_mode: settings.network.mode,
+            relay: self.core.relay.status(),
             sessions: self.core.sessions.snapshot(),
             pending_pairing: self.core.pairing.pending(),
             connect_window_open: self.core.pairing.window().is_some(),
@@ -319,7 +369,59 @@ impl Agent {
             locked_sources: self.core.guard.locked_sources().len(),
             store_integrity_warning: self.core.devices.read().integrity_warning,
             version: crate::VERSION.to_string(),
+            usb: self.core.usb.read().clone(),
         }
+    }
+
+    // --- USB Direct ---------------------------------------------------------------------
+
+    /// Test hook: behaves as if a tablet were connected by cable on `ip` (a loopback address).
+    /// The developer loopback endpoint also listens on that address.
+    pub fn simulate_usb(&self, ip: Ipv4Addr) {
+        *self.core.usb_simulation.write() = Some(crate::usb::Simulation {
+            ip,
+            connected: true,
+        });
+        crate::usb::wake(&self.core);
+    }
+
+    /// Plugs or unplugs the simulated cable. Returns the new state.
+    pub fn toggle_simulated_usb(&self) -> Option<bool> {
+        let connected = {
+            let mut simulation = self.core.usb_simulation.write();
+            let simulation = simulation.as_mut()?;
+            simulation.connected = !simulation.connected;
+            simulation.connected
+        };
+        crate::usb::wake(&self.core);
+        Some(connected)
+    }
+
+    /// Confirms a cable link (macOS needs no network-profile or firewall change for it).
+    pub fn allow_usb_link(&self, id: &str) -> anyhow::Result<()> {
+        let link = self
+            .core
+            .usb
+            .read()
+            .links
+            .iter()
+            .find(|l| l.id == id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("Cette liaison USB n’est plus active."))?;
+        crate::platform::usb::allow_link(&link)?;
+        self.core.audit.record(
+            Severity::Notice,
+            "usb.network-allowed",
+            format!(
+                "La liaison USB « {} » est désormais un réseau privé autorisé pour Vision-Pro.",
+                link.alias
+            ),
+        );
+        self.core
+            .usb_diagnostics_stale
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        crate::usb::wake(&self.core);
+        Ok(())
     }
 
     // --- Pairing ----------------------------------------------------------------
@@ -572,10 +674,15 @@ impl Agent {
             .audit
             .record(Severity::Info, "settings.changed", "Settings were updated.");
         let _ = self.core.events.send(AgentEvent::SettingsChanged);
+        if previous.network.usb_direct != next.network.usb_direct {
+            crate::usb::wake(&self.core);
+        }
 
         let restart = previous.network.https_port != next.network.https_port
             || previous.network.mode != next.network.mode
             || previous.network.advertise_mdns != next.network.advertise_mdns
+            || previous.network.relay_url != next.network.relay_url
+            || previous.network.relay_token != next.network.relay_token
             || previous.advanced.developer_loopback != next.advanced.developer_loopback
             || previous.computer_name != next.computer_name;
         if restart && self.is_running() {
@@ -651,18 +758,31 @@ async fn maintenance_loop(core: Arc<Core>) {
             );
             let _ = core.events.send(AgentEvent::DevicesChanged);
         }
-        // Reissue the certificate when LAN addresses change (DHCP, Wi-Fi switch) or it ages.
-        let ips: Vec<Ipv4Addr> = crate::net::lan_interfaces()
-            .into_iter()
-            .map(|i| i.ip)
-            .collect();
-        let changed = *core.cert_ips.read() != ips;
-        if changed {
-            if let Err(error) = Agent::refresh_certificate(&core) {
-                tracing::warn!(%error, "certificate refresh failed");
-            }
-        }
+        // Fallback for missed address notifications (the USB monitor normally reacts first).
+        refresh_network(&core);
     }
+}
+
+/// Keeps the TLS certificate and the mDNS announcement in step with this Mac's addresses, so an
+/// iPad can reach the Mac right after a DHCP renewal, a Wi-Fi switch or a cable being plugged in.
+pub(crate) fn refresh_network(core: &Core) {
+    let _serialized = core.network_refresh.lock();
+    let ips: Vec<Ipv4Addr> = crate::net::lan_interfaces()
+        .into_iter()
+        .map(|i| i.ip)
+        .collect();
+    if *core.cert_ips.read() == ips {
+        return;
+    }
+    if let Err(error) = Agent::refresh_certificate(core) {
+        tracing::warn!(%error, "certificate refresh failed");
+        return;
+    }
+    if let Some(discovery) = core.discovery.read().clone() {
+        discovery.set_addresses(&ips);
+    }
+    tracing::info!(addresses = ?ips, "local addresses changed");
+    let _ = core.events.send(AgentEvent::NetworkChanged);
 }
 
 fn qr_svg(data: &str) -> anyhow::Result<String> {

@@ -49,6 +49,30 @@ pub struct vp_cursor_info_t {
     pub hash: u64,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct vp_usb_device_t {
+    pub registry_id: u64,
+    pub vendor_id: u16,
+    pub product_id: u16,
+    pub name: [c_char; 128],
+    pub interfaces: [[u8; 3]; 16],
+    pub interface_count: u32,
+}
+
+impl Default for vp_usb_device_t {
+    fn default() -> Self {
+        vp_usb_device_t {
+            registry_id: 0,
+            vendor_id: 0,
+            product_id: 0,
+            name: [0; 128],
+            interfaces: [[0; 3]; 16],
+            interface_count: 0,
+        }
+    }
+}
+
 pub const VP_CODEC_H264: i32 = 0;
 pub const VP_CODEC_HEVC: i32 = 1;
 
@@ -159,6 +183,18 @@ extern "C" {
         len: usize,
     ) -> i32;
     pub fn vp_keychain_delete(service: *const c_char, account: *const c_char) -> i32;
+
+    pub fn vp_usb_devices(out: *mut vp_usb_device_t, capacity: i32) -> i32;
+    pub fn vp_interface_usb(
+        bsd_name: *const c_char,
+        vendor_id: *mut u16,
+        product_id: *mut u16,
+        display: *mut c_char,
+        display_len: usize,
+    ) -> bool;
+    pub fn vp_primary_interface_index() -> u32;
+    pub fn vp_interface_index(bsd_name: *const c_char) -> u32;
+    pub fn vp_network_signature() -> u64;
 }
 
 /// NUL-terminated C buffer → owned UTF-8 string (lossy).

@@ -10,13 +10,14 @@ Ce dossier est la version **100 % macOS** du projet : aucun code, dépendance ni
 | --- | --- |
 | `apps/ipad` | PWA iPadOS/Safari : association, réception WebRTC, toucher, trackpad, Apple Pencil, profils créatifs, qualité, statistiques |
 | `apps/desktop` | Application Mac native (Tauri + WKWebView) : service, appareils, écrans, diffusion, commandes, sécurité, réseau, autorisations macOS |
-| `agent/crates/vp-agent` | Agent Rust : mDNS/Bonjour, signalisation WebSocket authentifiée, association, sessions, WebRTC |
+| `agent/crates/vp-agent` | Agent Rust : mDNS/Bonjour, signalisation WebSocket authentifiée, association, sessions, WebRTC, USB Direct, client du relais d’accès distant |
+| `agent/crates/vp-relay` | Relais Internet optionnel (à héberger soi-même) : registre des Mac signé, signalisation chiffrée de bout en bout, TURN réservé aux Mac enregistrés |
 | `agent/crates/vp-agent/native` | Pont Objective-C vers ScreenCaptureKit, VideoToolbox, Quartz Event Services, Keychain, IOKit |
 | `agent/crates/vp-agent/src/platform` | Couche macOS en Rust (écrans, capture, encodeur, injection, clavier, Keychain, autorisations) |
 | `packages/protocol` | Protocole TypeScript partagé (binaire + signalisation), cryptographie, validation, profils d'apps Mac |
 | `packages/design` | Composants React et icônes partagés |
 | `server` | Service de comptes optionnel ; ne transporte jamais la vidéo locale |
-| `docs` | Architecture, sécurité |
+| `docs` | Architecture, sécurité, USB Direct, relais |
 
 ## Prérequis
 
@@ -129,6 +130,14 @@ cargo test --manifest-path agent/Cargo.toml -- --ignored
 | Démarrage | LaunchAgent « Ouvrir à l'ouverture de session » ; fermer la fenêtre garde le service actif, ⌘Q quitte |
 | Arrêt d'urgence | Raccourci global ⌘⌥⇧⌫ |
 
+## USB Direct (câble)
+
+Branchez l’iPad au Mac (USB-C, ou Lightning vers USB) : signalisation, image, curseur et commandes passent alors par le câble, sans Wi-Fi. Sur l’iPad (modèle Wi-Fi + Cellular) : **Réglages → Partage de connexion → Autoriser d’autres utilisateurs**, puis touchez **Se fier**. macOS inclut les pilotes : rien à installer. Le réglage se trouve dans **Réseau → Câble USB**. Détails : [docs/USB.md](docs/USB.md).
+
+## Accès à distance (relais)
+
+Pour contrôler le Mac depuis un autre réseau, hébergez un relais Vision-Pro (`agent/crates/vp-relay`) et renseignez son adresse dans **Réseau → Accès à distance**. Le relais ne voit jamais l’image ni les frappes : tout reste chiffré de bout en bout. Détails : [docs/RELAY.md](docs/RELAY.md).
+
 ## Service de comptes optionnel
 
 Le service de comptes écoute sur `127.0.0.1` et doit être placé derrière un proxy TLS. Il n'est pas nécessaire pour le contrôle direct en réseau local.
@@ -139,6 +148,6 @@ VP_ACCOUNT_PORT=3000 VP_ACCOUNT_DATA="$HOME/Vision-Pro/users.json" VP_WEB_ROOT="
 
 ## Limites actuelles
 
-La découverte locale, l'association sécurisée, la diffusion WebRTC directe et le contrôle à distance sont implémentés. L'accès à distance via relais est prévu dans l'architecture mais volontairement inactif sans relais authentifié. macOS n'a pas d'encodeur AV1 matériel : l'agent négocie H.264 ou HEVC.
+La découverte locale, l'association sécurisée, la diffusion WebRTC directe et le contrôle à distance sont implémentés. L'accès à distance fonctionne avec un relais que vous hébergez ; il reste désactivé en mode Local uniquement. macOS n'a pas d'encodeur AV1 matériel : l'agent négocie H.264 ou HEVC.
 
 Voir [architecture](docs/ARCHITECTURE.md) et [modèle de sécurité](docs/SECURITY.md).

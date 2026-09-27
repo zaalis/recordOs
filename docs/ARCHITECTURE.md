@@ -18,6 +18,29 @@ macOS desktop
 
 The optional account server is outside this path. Local video and input are not proxied through it.
 
+## USB cable path
+
+```text
+iPad ══ USB cable (Personal Hotspot / USB tethering: a private point-to-point IP link) ══ Mac
+  wss://<cable address>:47800/ws   signaling
+  DTLS/SRTP on the cable address   video, cursor, input (the only ICE candidate offered)
+```
+
+The agent detects tablets and cable interfaces (IOKit and address changes), keeps the
+certificate and Bonjour announcement valid for the cable address, marks sessions arriving on it as
+USB sessions, tells Wi-Fi sessions when a cable appears and ends cable sessions when it goes. The
+iPad probes cable endpoints before connecting and moves a running session onto the cable. See
+[USB Direct](USB.md).
+
+## Remote Access path
+
+```text
+iPad ── wss signaling ─┐                 ┌─ wss data connection (one-time ticket) ── Mac
+     └─ TURN (udp/tcp/tls) ── vp-relay ── media tunnel (UDP, WebSocket fallback) ──┘
+```
+
+The relay splices signaling that remains end-to-end encrypted and routes DTLS/SRTP packets between an iPad TURN allocation and one virtual ICE candidate of the Mac. See [relay](RELAY.md).
+
 ## Runtime layers
 
 1. The agent creates or loads its device identity and local certificate (sealed with a key kept in the login Keychain), opens the bounded signaling service, and advertises discovery metadata over Bonjour (`_vision-pro._tcp`).
@@ -52,5 +75,7 @@ The Mac interface calls a narrow Tauri command facade. It does not expose a gene
 - Capture, scaling, colour conversion and encoding stay on the GPU / media engine.
 - Hardware codecs are preferred and negotiated against browser capability.
 - Pointer movement uses an unordered low-latency channel; state-changing commands use a reliable channel.
+- Encoded video has its own two-frame queue (stale frames are dropped, never delayed); cursor and control events use a separate queue so mouse movement never displaces video.
+- VideoToolbox encodes synchronously (one frame in flight, flushed at once), so an encoded frame never waits for the next screen change.
 - Input is dispatched immediately and does not wait for a video frame.
 - Quality requests are bounded by both protocol validation and agent policy.

@@ -21,6 +21,11 @@ pub struct NearbyAgent {
 pub struct Discovery {
     daemon: mdns_sd::ServiceDaemon,
     fullname: String,
+    instance: String,
+    host: String,
+    name: String,
+    agent_id: String,
+    port: u16,
 }
 
 impl Discovery {
@@ -35,7 +40,7 @@ impl Discovery {
         let daemon = mdns_sd::ServiceDaemon::new()?;
         let instance = format!(
             "vp-{}",
-            &agent_id[..8].to_lowercase().replace(['_', '-'], "0")
+            agent_id[..8].to_lowercase().replace(['_', '-'], "0")
         );
         let host = format!("{hostname}.");
         let name: String = computer_name
@@ -43,17 +48,9 @@ impl Discovery {
             .filter(|c| !c.is_control())
             .take(48)
             .collect();
-        let properties = [("id", agent_id), ("name", name.as_str()), ("v", "1")];
-        let ip_list: Vec<std::net::IpAddr> =
-            ips.iter().map(|ip| std::net::IpAddr::V4(*ip)).collect();
-        let info = mdns_sd::ServiceInfo::new(
-            SERVICE_TYPE,
-            &instance,
-            &host,
-            &ip_list[..],
-            port,
-            &properties[..],
-        )?;
+        // New interfaces (a USB tethering adapter, another Wi-Fi) are bound quickly.
+        let _ = daemon.set_ip_check_interval(2);
+        let info = service_info(&instance, &host, &name, agent_id, ips, port)?;
         let fullname = info.get_fullname().to_string();
         daemon.register(info)?;
 
@@ -91,7 +88,7 @@ impl Discovery {
                             nearby.write().retain(|a| {
                                 !fullname.starts_with(&format!(
                                     "vp-{}",
-                                    &a.agent_id[..8].to_lowercase().replace(['_', '-'], "0")
+                                    a.agent_id[..8].to_lowercase().replace(['_', '-'], "0")
                                 ))
                             });
                         }
@@ -100,8 +97,56 @@ impl Discovery {
                     }
                 }
             })?;
-        Ok(Discovery { daemon, fullname })
+        Ok(Discovery {
+            daemon,
+            fullname,
+            instance,
+            host,
+            name,
+            agent_id: agent_id.to_string(),
+            port,
+        })
     }
+
+    /// Re-announces the service with the current addresses. Responses on each interface only
+    /// carry the addresses of that interface, so an iPad on a cable resolves the cable address.
+    pub fn set_addresses(&self, ips: &[Ipv4Addr]) {
+        match service_info(
+            &self.instance,
+            &self.host,
+            &self.name,
+            &self.agent_id,
+            ips,
+            self.port,
+        ) {
+            Ok(info) => {
+                if let Err(error) = self.daemon.register(info) {
+                    tracing::warn!(%error, "mDNS re-announcement failed");
+                }
+            }
+            Err(error) => tracing::warn!(%error, "mDNS service info rejected"),
+        }
+    }
+}
+
+fn service_info(
+    instance: &str,
+    host: &str,
+    name: &str,
+    agent_id: &str,
+    ips: &[Ipv4Addr],
+    port: u16,
+) -> anyhow::Result<mdns_sd::ServiceInfo> {
+    let properties = [("id", agent_id), ("name", name), ("v", "1")];
+    let ip_list: Vec<std::net::IpAddr> = ips.iter().map(|ip| std::net::IpAddr::V4(*ip)).collect();
+    Ok(mdns_sd::ServiceInfo::new(
+        SERVICE_TYPE,
+        instance,
+        host,
+        &ip_list[..],
+        port,
+        &properties[..],
+    )?)
 }
 
 impl Drop for Discovery {

@@ -12,12 +12,15 @@ import {
   type CursorUpdate,
   type DeviceIdentity,
   type DisplayInfo,
+  type SessionLink,
   type SessionReady,
   SignalingClient,
   type VideoSettings,
   b64u,
+  cableSignalingUrls,
   decodeCursor,
   fingerprintOf,
+  firstReachable,
   signRotation,
   generateDeviceIdentity,
 } from '@vision-pro/protocol';
@@ -78,16 +81,28 @@ export interface ConnectionSnapshot {
   stream: MediaStream | null;
   connectedAt: number | null;
   reconnectAttempt: number;
+  /** Physical path of the current session (Wi-Fi, USB cable, Internet relay). */
+  link: SessionLink | null;
+  /** The session is moving to another path (Wi-Fi → cable); the picture stays on screen. */
+  switching: boolean;
 }
 
 export interface ConnectTarget {
   agentId?: string;
   name: string;
   fingerprint?: string;
+  /** Explicit endpoint (the Internet relay). */
   url?: string;
+  /** USB cable endpoints of the Mac, tried first when reachable. */
+  usbUrls?: string[];
   mode: 'pair' | 'auth';
   proof?: { kind: 'qr' | 'code'; secret: string };
 }
+
+/** Time allowed for a cable endpoint to answer before the local network is used. */
+const CABLE_PROBE_MS = 1500;
+/** A cable endpoint that did not answer is not retried for this long (unless the Mac announces it). */
+const CABLE_RETRY_MS = 15_000;
 
 const EMPTY_STATS: LiveStats = {
   pingMs: null,
@@ -125,7 +140,8 @@ const ERROR_TEXT: Record<string, string> = {
   version: 'Mettez à jour Vision-Pro sur le Mac ou l’iPad.',
   not_local: 'Ce Mac accepte uniquement les appareils du même réseau.',
   protocol: 'La connexion a été interrompue.',
-  unreachable: 'Le Mac ne répond pas. Vérifiez que Vision-Pro est ouvert sur le Mac, puis réessayez.',
+  unreachable: 'Le Mac ne répond pas. Vérifiez que Vision-Pro est ouvert sur le Mac (ou que le câble USB et le Partage de connexion sont actifs), puis réessayez.',
+  offline: 'Ce Mac n’est pas joignable par Internet. Vérifiez que Vision-Pro est ouvert et que l’accès à distance est activé sur le Mac.',
 };
 
 export function describeError(code: string): string {
@@ -158,7 +174,6 @@ export class Connection {
   private closedByUser = false;
   private reconnectTimer?: number;
   private peerTimer?: number;
-  private disconnectedTimer?: number;
   private lastFrameProgressAt = 0;
   private keyframeRecoveryRequested = false;
   private suspendedForPagehide = false;
@@ -170,9 +185,20 @@ export class Connection {
   // disconnect may close a peer while its createOffer promise is still pending.
   private peerEpoch = 0;
   private cursorShapes = new Map<number, CursorShapeInfo>();
+  private signalUrl: string | null = null;
+  private cableFailedAt = new Map<string, number>();
+  private movingToCable = false;
+  private iceWatchdog?: number;
+  private answerTimer?: number;
+  private cableRetryTimer?: number;
   onCursor?: (cursor: CursorUpdate) => void;
   onCursorShape?: (shape: CursorShapeInfo) => void;
-  onPaired?: (info: { agentId: string; name: string; fingerprint: string }) => void;
+  onPaired?: (info: { agentId: string; name: string; fingerprint: string; relayUrl?: string; usbUrls: string[] }) => void;
+  /**
+   * Current cable endpoints of a Mac. Given the endpoints already known, returns the ones to try
+   * (the app asks the Mac when it can reach it, and otherwise falls back to what it learned).
+   */
+  cablePaths?: (agentId: string, known: string[]) => Promise<string[]>;
   onAccessRemoved?: (agentId: string) => void;
   onIdentityRotated?: (identity: DeviceIdentity) => void;
 
@@ -192,6 +218,8 @@ export class Connection {
       stream: null,
       connectedAt: null,
       reconnectAttempt: 0,
+      link: null,
+      switching: false,
     };
   }
 
@@ -215,23 +243,57 @@ export class Connection {
     const connectEpoch = ++this.connectEpoch;
     this.teardown();
     this.closedByUser = false;
-    this.suspendedForPagehide = false;
     this.target = target;
     this.identity = identity;
     this.deviceName = deviceName;
     this.video = video;
     this.lowDecodeSamples = 0;
     this.performanceRecoveryApplied = false;
+    this.suspendedForPagehide = false;
     this.update({ ...this.initial(), phase: 'connecting' });
     [this.codecs, this.refreshHz] = await Promise.all([detectCodecs(), measureRefreshRate()]);
     if (this.closedByUser || connectEpoch !== this.connectEpoch) return;
-    this.openSignaling();
+    await this.openSignaling();
   }
 
-  private openSignaling(): void {
+  private cableRecentlyFailed(url: string): boolean {
+    const at = this.cableFailedAt.get(url);
+    return at !== undefined && Date.now() - at < CABLE_RETRY_MS;
+  }
+
+  /**
+   * Signaling endpoint for the next (re)connection: a USB cable endpoint when this iPad is at the
+   * other end of the cable, otherwise the app's own origin (Wi-Fi/Ethernet), or the relay.
+   */
+  private async chooseSignalingUrl(): Promise<string> {
     const target = this.target!;
+    if (target.url) return target.url;
+    const agentId = target.agentId;
+    if (!agentId) return signalingUrl();
+    let cable = cableSignalingUrls(target.usbUrls ?? []);
+    if (this.cablePaths) {
+      try {
+        cable = cableSignalingUrls(await this.cablePaths(agentId, cable));
+      } catch {
+        /* keep the known endpoints */
+      }
+    }
+    cable = cable.filter((url) => !this.cableRecentlyFailed(url));
+    if (!cable.length) return signalingUrl();
+    const reachable = await firstReachable(cable, agentId, CABLE_PROBE_MS);
+    if (reachable) return reachable;
+    for (const url of cable) this.cableFailedAt.set(url, Date.now());
+    return signalingUrl();
+  }
+
+  private async openSignaling(forcedUrl?: string): Promise<void> {
+    const connectEpoch = this.connectEpoch;
+    const url = forcedUrl ?? (await this.chooseSignalingUrl());
+    if (this.closedByUser || connectEpoch !== this.connectEpoch || !this.target) return;
+    const target = this.target;
+    this.signalUrl = url;
     const signaling = new SignalingClient({
-      url: target.url ?? signalingUrl(),
+      url,
       identity: this.identity,
       deviceName: this.deviceName,
       deviceKind: deviceKind(),
@@ -258,16 +320,66 @@ export class Connection {
           void this.onSignalMessage(event.message);
           break;
         case 'error':
-          if (target.mode === 'auth' && (event.code === 'unreachable' || event.code === 'rate_limited')) {
-            this.scheduleReconnect(event.retryAfterMs);
-          } else this.fail(event.code);
+          // Only a path problem falls back; an authorization answer (revoked, locked out…) is shown.
+          if (this.snapshot.switching && (event.code === 'unreachable' || event.code === 'protocol')) this.abortCableMove(url);
+          // A known Mac that is briefly unreachable or rate limiting is retried, not abandoned.
+          else if (target.mode === 'auth' && (event.code === 'unreachable' || event.code === 'rate_limited')) this.scheduleReconnect(event.retryAfterMs);
+          else this.fail(event.code);
           break;
         case 'closed':
-          this.onSignalClosed();
+          if (this.snapshot.switching) this.abortCableMove(url);
+          else this.onSignalClosed();
           break;
       }
     });
     signaling.connect();
+  }
+
+  /** The cable answered the probe but the session could not start there: go back to Wi-Fi. */
+  private abortCableMove(url: string): void {
+    this.cableFailedAt.set(url, Date.now());
+    this.update({ switching: false });
+    this.scheduleReconnect(0);
+  }
+
+  /**
+   * The Mac reports cable endpoints while this session runs over Wi-Fi. If this iPad can reach one,
+   * it is the tablet on the cable: move the whole session (signaling, video, input) onto it.
+   */
+  private async moveToCable(urls: string[], announced: boolean): Promise<void> {
+    const target = this.target;
+    const agentId = target?.agentId;
+    if (!agentId || !target || target.url || target.mode !== 'auth' || this.movingToCable) return;
+    if (this.snapshot.link !== 'lan' || this.snapshot.switching) return;
+    const all = cableSignalingUrls(urls);
+    const candidates = all.filter((url) => announced || !this.cableRecentlyFailed(url));
+    if (!candidates.length) {
+      // The cable failed moments ago (unplugged, then plugged back?): look once more later.
+      if (all.length) {
+        window.clearTimeout(this.cableRetryTimer);
+        this.cableRetryTimer = window.setTimeout(() => void this.moveToCable(all, true), CABLE_RETRY_MS);
+      }
+      return;
+    }
+    this.movingToCable = true;
+    const connectEpoch = this.connectEpoch;
+    try {
+      const url = await firstReachable(candidates, agentId, CABLE_PROBE_MS);
+      if (!url) {
+        for (const candidate of candidates) this.cableFailedAt.set(candidate, Date.now());
+        return;
+      }
+      const phase = this.snapshot.phase;
+      const live = phase === 'streaming' || phase === 'negotiating' || phase === 'reconnecting';
+      if (this.closedByUser || connectEpoch !== this.connectEpoch || this.snapshot.link !== 'lan' || !live) return;
+      this.target = { ...target, usbUrls: [url, ...(target.usbUrls ?? []).filter((u) => u !== url)] };
+      this.update({ switching: true });
+      // Closing the Wi-Fi session first frees its capture; the last picture stays on screen.
+      this.teardown(false);
+      await this.openSignaling(url);
+    } finally {
+      this.movingToCable = false;
+    }
   }
 
   private onReady(session: SessionReady): void {
@@ -275,31 +387,45 @@ export class Connection {
     const agentPub = this.signaling?.agentPublicKey;
     if (hello && agentPub) {
       // Pin the Mac key on every successful session (first pairing is trust-on-approval + SAS).
-      void fingerprintOf(agentPub).then((fingerprint) => this.onPaired?.({ agentId: hello.agentId, name: hello.agentName, fingerprint }));
+      const relayUrl = typeof session.relay?.url === 'string' ? session.relay.url : undefined;
+      const usbUrls = cableSignalingUrls(session.usb?.urls);
+      void fingerprintOf(agentPub).then((fingerprint) => this.onPaired?.({ agentId: hello.agentId, name: hello.agentName, fingerprint, usbUrls, ...(relayUrl ? { relayUrl } : {}) }));
     }
     if (hello) {
       this.target = { ...this.target!, mode: 'auth', agentId: hello.agentId, name: hello.agentName };
       delete this.target.proof;
     }
+    const link: SessionLink = session.link ?? (this.target?.url ? 'relay' : 'lan');
     this.update({
+      link,
       session,
       phase: 'negotiating',
       sas: null,
       displays: session.caps.displays,
       activeDisplayId: session.caps.activeDisplayId,
       controlAllowed: session.device.permission === 'control',
+      reconnectAttempt: 0,
       error: null,
     });
     void this.startPeer();
+    // Connected over Wi-Fi while a cable is plugged in (e.g. its probe was too slow): move now.
+    if (link === 'lan' && session.usb?.urls?.length) void this.moveToCable(session.usb.urls, false);
   }
 
   private async startPeer(): Promise<void> {
     this.closePeer();
-    this.update({ phase: 'negotiating', stream: null, connectedAt: null, stats: EMPTY_STATS });
     const peerEpoch = this.peerEpoch;
-    const pc = new RTCPeerConnection({ iceServers: [], bundlePolicy: 'max-bundle', rtcpMuxPolicy: 'require' });
-    let trackReceived = false;
+    // Relayed sessions receive short-lived TURN credentials from the Mac inside the encrypted
+    // channel; every packet then goes through the relay. Local sessions use host candidates only.
+    const ice = this.snapshot.session?.ice;
+    const pc = new RTCPeerConnection({
+      iceServers: ice?.iceServers ?? [],
+      iceTransportPolicy: ice ? 'relay' : 'all',
+      bundlePolicy: 'max-bundle',
+      rtcpMuxPolicy: 'require',
+    });
     this.pc = pc;
+    let trackReceived = false;
     const transceiver = pc.addTransceiver('video', { direction: 'recvonly' });
     this.applyCodecPreferences(transceiver);
 
@@ -348,26 +474,28 @@ export class Connection {
           window.clearTimeout(this.peerTimer);
           this.peerTimer = undefined;
         }
-        window.clearTimeout(this.disconnectedTimer);
-        this.disconnectedTimer = undefined;
         if (this.snapshot.phase !== 'streaming') {
-          this.update({ phase: 'streaming', connectedAt: Date.now(), reconnectAttempt: 0 });
+          this.update({ phase: 'streaming', switching: false, reconnectAttempt: 0, connectedAt: this.snapshot.connectedAt ?? Date.now() });
         }
       }
       if (state === 'failed') this.scheduleReconnect(0);
-      if (state === 'disconnected' && this.disconnectedTimer === undefined) {
-        this.disconnectedTimer = window.setTimeout(() => {
-          this.disconnectedTimer = undefined;
-          if (this.isCurrentPeer(pc, peerEpoch) && pc.connectionState === 'disconnected') this.scheduleReconnect();
-        }, 4_000);
-      }
     };
     pc.oniceconnectionstatechange = () => {
       if (!this.isCurrentPeer(pc, peerEpoch)) return;
-      this.update({ stats: { ...this.snapshot.stats, iceState: pc.iceConnectionState } });
-      if (pc.iceConnectionState === 'failed') this.scheduleReconnect(0);
+      const state = pc.iceConnectionState;
+      this.update({ stats: { ...this.snapshot.stats, iceState: state } });
+      window.clearTimeout(this.iceWatchdog);
+      if (state === 'disconnected') {
+        // Browsers wait up to 30 s before declaring the path failed. A cable that was unplugged
+        // never comes back: reconnect (over Wi-Fi) almost at once; give Wi-Fi a few seconds.
+        const grace = this.snapshot.link === 'usb' ? 1_200 : 4_000;
+        this.iceWatchdog = window.setTimeout(() => {
+          if (this.pc === pc && pc.iceConnectionState === 'disconnected') this.scheduleReconnect(0);
+        }, grace);
+      }
     };
 
+    // Media must actually flow: a peer that never delivers a track is replaced.
     this.peerTimer = window.setTimeout(() => {
       if (!this.isCurrentPeer(pc, peerEpoch) || (pc.connectionState === 'connected' && trackReceived)) return;
       if (this.target?.mode === 'auth') this.scheduleReconnect();
@@ -383,11 +511,17 @@ export class Connection {
       // therefore omit Safari's LAN candidate and leave the UI stuck on
       // "Starting the display". Host-only LAN gathering is normally immediate;
       // the timeout keeps a broken network from blocking the UI indefinitely.
-      await waitForIceGathering(pc);
+      await waitForIceGathering(pc, ice ? 8_000 : 4_000);
       if (!this.isCurrentPeer(pc, peerEpoch)) return;
       const signaling = this.signaling;
       const sdp = pc.localDescription?.sdp;
       if (!signaling || !sdp) throw new Error('missing local WebRTC description');
+      // A signaling path that silently died (a pulled cable) never answers: reconnect instead of
+      // waiting behind "Starting the display".
+      window.clearTimeout(this.answerTimer);
+      this.answerTimer = window.setTimeout(() => {
+        if (this.isCurrentPeer(pc, peerEpoch) && !pc.remoteDescription) this.scheduleReconnect(0);
+      }, 10_000);
       await signaling.send({
         t: 'rtc.offer',
         sdp,
@@ -431,6 +565,7 @@ export class Connection {
       case 'rtc.answer': {
         const pc = this.pc;
         if (!pc) return;
+        window.clearTimeout(this.answerTimer);
         try {
           await pc.setRemoteDescription({ type: 'answer', sdp: String(message.sdp) });
         } catch {
@@ -450,17 +585,21 @@ export class Connection {
         return;
       case 'device.rotated':
         return;
+      case 'link.usb':
+        void this.moveToCable(Array.isArray(message.urls) ? (message.urls as string[]) : [], true);
+        return;
       case 'session.end': {
         const reason = String(message.reason);
-        if (reason === 'expired' || reason === 'replaced') {
-          this.scheduleReconnect(0);
+        // 'link': the cable carrying this session was unplugged; reconnect over Wi-Fi at once.
+        if (reason === 'expired' || reason === 'replaced' || reason === 'link') {
+          this.scheduleReconnect(0, reason === 'link', true);
         } else {
           this.closedByUser = true;
           if (reason === 'revoked' && this.target?.mode === 'auth' && this.target.agentId) {
             this.onAccessRemoved?.(this.target.agentId);
           }
           this.teardown();
-          this.update({ phase: reason === 'user' ? 'ended' : 'failed', error: reason === 'revoked' ? describeError('revoked') : reason === 'user' ? null : 'The session ended on the Mac.' });
+          this.update({ phase: reason === 'user' ? 'ended' : 'failed', error: reason === 'revoked' ? describeError('revoked') : reason === 'user' ? null : 'La session s’est arrêtée sur le Mac.' });
         }
         return;
       }
@@ -553,12 +692,11 @@ export class Connection {
     if (pc !== this.pc) return;
     const stats: LiveStats = { ...this.snapshot.stats };
     let codecId: string | undefined;
+    const now = performance.now();
     let decodedProgress = false;
     let decodedCounterAvailable = false;
-    const now = performance.now();
     report.forEach((entry: Record<string, unknown> & { type: string }) => {
       if (entry.type === 'inbound-rtp' && entry.kind === 'video') {
-        decodedCounterAvailable = typeof entry.framesDecoded === 'number';
         stats.fps = numberOr(entry.framesPerSecond, stats.fps);
         stats.width = numberOr(entry.frameWidth, stats.width);
         stats.height = numberOr(entry.frameHeight, stats.height);
@@ -572,6 +710,7 @@ export class Connection {
           if (seconds > 0) stats.bitrateKbps = ((bytes - this.lastBytes.bytes) * 8) / 1000 / seconds;
         }
         this.lastBytes = { bytes, at: now };
+        decodedCounterAvailable = typeof entry.framesDecoded === 'number';
         const decoded = Number(entry.framesDecoded ?? 0);
         const decodeTime = Number(entry.totalDecodeTime ?? 0);
         const jbDelay = Number(entry.jitterBufferDelay ?? 0);
@@ -716,31 +855,42 @@ export class Connection {
   private onSignalClosed(): void {
     if (this.closedByUser) return;
     if (this.snapshot.phase === 'failed' || this.snapshot.phase === 'ended') return;
-    if (this.target?.mode === 'auth') {
+    if (this.target?.mode === 'auth' || this.snapshot.phase === 'streaming' || this.snapshot.phase === 'negotiating' || this.snapshot.phase === 'reconnecting') {
       this.scheduleReconnect();
     } else {
       this.fail('protocol');
     }
   }
 
-  private scheduleReconnect(delay?: number): void {
+  /**
+   * `avoidCable`: the path failed, so a cable that carried the session is probably unplugged.
+   * `quiet`: an expected, fast path change; the picture stays without the reconnection overlay
+   * (a second attempt shows it).
+   */
+  private scheduleReconnect(delay?: number, avoidCable = true, quiet = false): void {
+    if (this.snapshot.phase === 'reconnecting' && this.reconnectTimer !== undefined && delay === 0) return;
     if (this.closedByUser || !this.target || this.target.mode !== 'auth') {
       this.fail('protocol');
       return;
     }
+    // The cable that carried the session is probably gone: prefer another path this time.
+    const fromCable = this.snapshot.link === 'usb';
+    if (avoidCable && fromCable && this.signalUrl) this.cableFailedAt.set(this.signalUrl, Date.now());
+    // Losing the cable falls back to Wi-Fi within a second or two: no overlay for that first try.
+    const silent = (quiet || fromCable) && this.snapshot.reconnectAttempt === 0;
     const attempt = this.snapshot.reconnectAttempt + 1;
     if (attempt > 8) {
       this.teardown();
       this.update({ phase: 'failed', error: describeError('protocol') });
       return;
     }
-    this.teardown();
-    this.update({ phase: 'reconnecting', reconnectAttempt: attempt, session: null, video: null, connectedAt: null, stats: EMPTY_STATS });
+    this.teardown(false);
+    this.update({ phase: 'reconnecting', reconnectAttempt: attempt, switching: silent });
     window.clearTimeout(this.reconnectTimer);
     const connectEpoch = this.connectEpoch;
     this.reconnectTimer = window.setTimeout(() => {
       this.reconnectTimer = undefined;
-      if (!this.closedByUser && connectEpoch === this.connectEpoch && this.snapshot.phase === 'reconnecting' && !this.signaling) this.openSignaling();
+      if (!this.closedByUser && connectEpoch === this.connectEpoch && this.snapshot.phase === 'reconnecting' && !this.signaling) void this.openSignaling();
     }, delay ?? Math.min(8000, 400 * 2 ** (attempt - 1)));
   }
 
@@ -749,20 +899,21 @@ export class Connection {
       this.onAccessRemoved?.(this.target.agentId);
     }
     this.teardown();
-    this.update({ phase: 'failed', error: describeError(code), sas: null });
+    this.update({ phase: 'failed', error: describeError(code), sas: null, switching: false });
   }
 
   private failMessage(message: string): void {
     this.teardown();
-    this.update({ phase: 'failed', error: message, sas: null });
+    this.update({ phase: 'failed', error: message, sas: null, switching: false });
   }
 
   private closePeer(): void {
     this.peerEpoch += 1;
     this.clearTimers();
+    window.clearTimeout(this.iceWatchdog);
+    window.clearTimeout(this.answerTimer);
     window.clearTimeout(this.peerTimer);
-    window.clearTimeout(this.disconnectedTimer);
-    this.peerTimer = this.disconnectedTimer = undefined;
+    this.peerTimer = undefined;
     for (const channel of [this.control, this.input, this.realtime]) {
       if (channel) {
         channel.onmessage = null;
@@ -778,6 +929,7 @@ export class Connection {
     if (this.pc) {
       this.pc.ontrack = null;
       this.pc.onconnectionstatechange = null;
+      this.pc.oniceconnectionstatechange = null;
       this.pc.close();
       this.pc = undefined;
     }
@@ -785,12 +937,12 @@ export class Connection {
     this.lastFrames = null;
     this.lastFrameProgressAt = 0;
     this.keyframeRecoveryRequested = false;
-    for (const shape of this.cursorShapes.values()) URL.revokeObjectURL(shape.url);
-    this.cursorShapes.clear();
   }
 
   private teardown(clearStream = true): void {
     window.clearTimeout(this.reconnectTimer);
+    window.clearTimeout(this.cableRetryTimer);
+    this.reconnectTimer = undefined;
     this.closePeer();
     const signaling = this.signaling;
     this.signaling = undefined;
@@ -805,7 +957,7 @@ export class Connection {
     this.connectEpoch += 1;
     this.teardown();
     if (this.target.mode === 'auth') {
-      this.update({ phase: 'reconnecting', session: null, video: null, connectedAt: null, stats: EMPTY_STATS });
+      this.update({ phase: 'reconnecting', session: null, video: null, connectedAt: null, stats: EMPTY_STATS, switching: false });
     }
   }
 
@@ -826,7 +978,7 @@ export class Connection {
       if (!this.signaling) {
         window.clearTimeout(this.reconnectTimer);
         this.reconnectTimer = undefined;
-        this.openSignaling();
+        void this.openSignaling();
       }
     } else if (this.snapshot.phase === 'streaming') {
       if (!this.pc || this.pc.connectionState === 'failed' || this.pc.connectionState === 'closed' || this.pc.connectionState === 'disconnected') {
@@ -840,7 +992,7 @@ export class Connection {
     this.closedByUser = true;
     this.suspendedForPagehide = false;
     this.teardown();
-    this.update({ phase: 'ended', session: null, stats: EMPTY_STATS, connectedAt: null });
+    this.update({ phase: 'ended', session: null, stats: EMPTY_STATS, connectedAt: null, link: null, switching: false });
   }
 
   reset(): void {

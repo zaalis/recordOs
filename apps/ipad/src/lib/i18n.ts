@@ -55,16 +55,19 @@ const french: Record<string, string> = {
   'Previous Space': 'Bureau précédent', 'Next Space': 'Bureau suivant', 'Screenshot': 'Capture d’écran', 'Close Window': 'Fermer la fenêtre',
   'Minimize': 'Placer dans le Dock', 'Hide App': 'Masquer l’app', 'Quit App': 'Quitter l’app', 'Force Quit': 'Forcer à quitter', 'Lock Screen': 'Verrouiller l’écran',
   'Media': 'Médias', 'Play / Pause': 'Lecture / Pause', 'Previous': 'Précédent', 'Next': 'Suivant', 'Mute': 'Muet',
+  'Via Internet': 'Via Internet', 'Internet relay': 'Relais Internet', 'End-to-end encrypted connection': 'Connexion chiffrée de bout en bout',
 };
 
 function translateValue(value: string): string {
   const direct = french[value];
   if (direct) return direct;
+  // formatRelative() output, alone in its text node ("Last used" is a separate node).
   return value
-    .replace(/^Last used /, 'Utilisé pour la dernière fois ')
-    .replace(/ min ago$/, ' min auparavant')
-    .replace(/ hr ago$/, ' h auparavant')
-    .replace(/ days ago$/, ' jours auparavant');
+    .replace(/^Last used$/, 'Utilisé')
+    .replace(/^Just now$/, 'à l’instant')
+    .replace(/^(\d+) min ago$/, 'il y a $1 min')
+    .replace(/^(\d+) h ago$/, 'il y a $1 h')
+    .replace(/^(\d+) d ago$/, 'il y a $1 j');
 }
 
 function localizeElement(root: Element): void {

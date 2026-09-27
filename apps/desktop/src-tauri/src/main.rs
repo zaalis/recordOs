@@ -149,6 +149,17 @@ fn open_permission_settings(kind: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Kept for API parity with the other platforms: macOS needs no network or firewall change for a
+/// tablet's USB network, so this only re-checks the link.
+#[tauri::command]
+async fn allow_usb_link(agent: tauri::State<'_, SharedAgent>, id: String) -> Result<(), String> {
+    let agent = agent.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || agent.allow_usb_link(&id))
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())
+}
+
 fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -231,6 +242,7 @@ fn main() {
             get_permissions,
             request_permission,
             open_permission_settings,
+            allow_usb_link,
         ])
         .build(tauri::generate_context!())
         .expect("failed to build Vision-Pro");

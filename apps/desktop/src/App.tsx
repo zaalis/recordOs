@@ -1,5 +1,6 @@
 import { Badge, Button, Group, Icon, IconButton, Row, Segmented, Switch, formatBitrate, formatDuration, formatMs, formatRelative, useToast, type IconName } from '@vision-pro/design';
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import type { RelayStatus, UsbLink, UsbStatus, UsbTablet } from './api.ts';
 import { api, type AgentStatus, type AuditEntry, type ConnectInfo, type Device, type PermissionKind, type Permissions, type Settings } from './api.ts';
 import { useDesktopLanguage } from './i18n.ts';
 
@@ -56,6 +57,11 @@ export function App() {
     finally { setBusy(false); }
   };
 
+  const allowUsb = async (link: UsbLink) => {
+    try { await api.allowUsbLink(link.id); toast('Liaison USB configurée.', { icon: 'check', tone: 'green' }); await refresh(); }
+    catch (error) { toast(String(error), { icon: 'alert', tone: 'red' }); }
+  };
+
   if (!status || !settings) return <div className="desktop-loading"><span className="vp-spinner" /><span>Starting Vision-Pro…</span></div>;
 
   return (
@@ -64,7 +70,7 @@ export function App() {
         <div className="sidebar-titlebar" data-tauri-drag-region />
         <div className="desktop-wordmark" data-tauri-drag-region>Vision-Pro</div>
         <nav aria-label="Main navigation">{nav.map((item) => <button key={item.id} type="button" className="nav-item" aria-current={page === item.id ? 'page' : undefined} onClick={() => setPage(item.id)}><Icon name={item.icon} size={19} /><span>{item.label}</span>{item.id === 'devices' && devices.length > 0 && <span className="nav-count">{devices.length}</span>}</button>)}</nav>
-        <div className="sidebar-status"><span className="vp-dot" data-tone={status.running ? 'green' : 'red'} /><div><b>{status.running ? 'Ready' : 'Stopped'}</b><small>{status.networkMode === 'local-only' ? 'Local network only' : 'Remote access'}</small></div></div>
+        <div className="sidebar-status"><span className="vp-dot" data-tone={status.running ? 'green' : 'red'} /><div><b>{status.running ? 'Ready' : 'Stopped'}</b><small>{status.networkMode === 'local-only' ? 'Local network only' : status.relay.state === 'connected' ? 'Remote access' : 'Relay unreachable'}</small>{status.usb.links.length > 0 && <small className="sidebar-usb"><Icon name="cable" size={12} /> Câble USB actif</small>}</div></div>
       </aside>
 
       <main className="desktop-main">
@@ -75,13 +81,13 @@ export function App() {
         {status.pendingPairing && <PairingBanner request={status.pendingPairing} onRespond={async (approve) => { await api.respondPairing(status.pendingPairing!.id, approve); await refresh(); }} />}
 
         <div className="desktop-content">
-          {page === 'home' && <Overview status={status} devices={devices} audit={audit} onConnect={openConnect} onEmergency={async () => { const count = await api.emergency(); toast(`${count} connexion${count === 1 ? '' : 's'} arrêtée${count === 1 ? '' : 's'}.`, { icon: 'power', tone: 'orange' }); await refresh(); }} />}
+          {page === 'home' && <Overview status={status} devices={devices} audit={audit} onConnect={openConnect} onAllowUsb={allowUsb} onEmergency={async () => { const count = await api.emergency(); toast(`${count} connexion${count === 1 ? '' : 's'} arrêtée${count === 1 ? '' : 's'}.`, { icon: 'power', tone: 'orange' }); await refresh(); }} />}
           {page === 'devices' && <Devices devices={devices} act={async (id, action, value) => { await api.deviceAction(id, action, value); await refresh(); }} />}
           {page === 'display' && <DisplayPage status={status} settings={settings} save={save} />}
           {page === 'streaming' && <StreamingPage status={status} settings={settings} save={save} />}
           {page === 'input' && <InputPage settings={settings} save={save} />}
           {page === 'security' && <SecurityPage status={status} settings={settings} save={save} audit={audit} permissions={permissions} onPermission={async (kind) => { await api.requestPermission(kind); await refresh(); }} />}
-          {page === 'network' && <NetworkPage settings={settings} save={save} />}
+          {page === 'network' && <NetworkPage status={status} settings={settings} save={save} onAllowUsb={allowUsb} />}
           {page === 'advanced' && <AdvancedPage status={status} settings={settings} save={save} />}
           {page === 'about' && <About status={status} />}
         </div>
@@ -91,12 +97,13 @@ export function App() {
   );
 }
 
-function Overview({ status, devices, audit, onConnect, onEmergency }: { status: AgentStatus; devices: Device[]; audit: AuditEntry[]; onConnect: () => void; onEmergency: () => void }) {
+function Overview({ status, devices, audit, onConnect, onEmergency, onAllowUsb }: { status: AgentStatus; devices: Device[]; audit: AuditEntry[]; onConnect: () => void; onEmergency: () => void; onAllowUsb: (link: UsbLink) => Promise<void> }) {
   const session = status.sessions[0];
   return <>
     <section className="status-hero" data-connected={session ? 'true' : undefined}><div className="status-orb"><span className="vp-dot" data-tone={status.running ? 'green' : 'red'} /></div><div className="status-copy"><p className="eyebrow">Status</p><h2>{session ? 'Connected' : status.running ? 'Ready' : 'Service stopped'}</h2><p>{session ? `${session.deviceName} is ${session.permission === 'control' ? 'controlling' : 'viewing'} this Mac.` : status.running ? 'Vision-Pro is waiting securely on your private network.' : 'Start the service to make this Mac available.'}</p></div>{session ? <Button variant="danger" icon="power" onClick={onEmergency}>Disconnect</Button> : <Button variant="primary" icon="plus" onClick={onConnect} disabled={!status.running}>Connect Device</Button>}</section>
-    <div className="summary-grid"><Summary icon="tablet" label="Connected device" value={session?.deviceName ?? 'None'} detail={session?.ip ?? `${devices.filter((d) => d.status === 'trusted').length} trusted`} /><Summary icon="display" label="Display" value={session?.video ? `${session.video.width} × ${session.video.height}` : status.caps.displays[0]?.name ?? 'Unavailable'} detail={session?.video ? `${session.video.fps} FPS` : `${status.caps.displays[0]?.refreshHz ?? 0} Hz`} /><Summary icon="gauge" label="Latency" value={session?.rttMs != null ? formatMs(session.rttMs) : '—'} detail={session?.stats ? `${session.stats.sentFps.toFixed(0)} FPS sent` : 'No active stream'} /><Summary icon="shield" label="Security" value="Protected" detail={status.networkMode === 'local-only' ? 'Local Only' : 'Remote Access'} /></div>
-    {session && <section className="desktop-card"><CardTitle title="Live streaming" subtitle={session.activeApp ?? 'macOS desktop'} action={<Badge tone="green" dot>Connected</Badge>} /><div className="live-metrics"><Metric value={session.video?.codec.toUpperCase() ?? '—'} label="Codec" /><Metric value={session.video?.hardware ? 'Hardware' : 'Software'} label="Encoder" /><Metric value={formatBitrate(session.stats?.sentKbps)} label="Bitrate" /><Metric value={formatMs(session.stats?.inputProcessMs)} label="Input processing" /></div></section>}
+    <div className="summary-grid"><Summary icon={session?.link === 'usb' ? 'cable' : 'tablet'} label="Connected device" value={session?.deviceName ?? 'None'} detail={session ? `${session.ip}${session.link === 'usb' ? ' · câble USB' : session.viaRelay ? ' · via relay' : ''}` : `${devices.filter((d) => d.status === 'trusted').length} trusted`} /><Summary icon="display" label="Display" value={session?.video ? `${session.video.width} × ${session.video.height}` : status.caps.displays[0]?.name ?? 'Unavailable'} detail={session?.video ? `${session.video.fps} FPS` : `${status.caps.displays[0]?.refreshHz ?? 0} Hz`} /><Summary icon="gauge" label="Latency" value={session?.rttMs != null ? formatMs(session.rttMs) : '—'} detail={session?.stats ? `${session.stats.sentFps.toFixed(0)} FPS sent` : 'No active stream'} /><Summary icon="shield" label="Security" value="Protected" detail={status.networkMode === 'local-only' ? 'Local Only' : 'Remote Access'} /></div>
+    {status.usb.enabled && (status.usb.links.length > 0 || status.usb.devices.length > 0) && <UsbCard usb={status.usb} sessions={status.sessions} onAllow={onAllowUsb} />}
+    {session && <section className="desktop-card"><CardTitle title="Live streaming" subtitle={session.activeApp ?? 'macOS desktop'} action={<Badge tone="green" dot>{session.link === 'usb' ? 'Câble USB' : 'Connected'}</Badge>} /><div className="live-metrics"><Metric value={session.video?.codec.toUpperCase() ?? '—'} label="Codec" /><Metric value={session.video?.hardware ? 'Hardware' : 'Software'} label="Encoder" /><Metric value={formatBitrate(session.stats?.sentKbps)} label="Bitrate" /><Metric value={formatMs(session.stats?.inputProcessMs)} label="Input processing" /></div></section>}
     <section className="desktop-card"><CardTitle title="Recent security activity" subtitle="Security-relevant events from this Mac" />{audit.length ? <div className="activity-list">{audit.slice(0, 5).map((entry, i) => <div key={`${entry.ts}-${i}`} className="activity"><span className="vp-dot" data-tone={entry.severity === 'critical' ? 'red' : entry.severity === 'warning' ? 'orange' : 'green'} /><div><b>{entry.message}</b><small>{formatRelative(entry.ts)}</small></div></div>)}</div> : <div className="desktop-empty">No security events yet.</div>}</section>
   </>;
 }
@@ -116,7 +123,106 @@ function InputPage({ settings, save }: Omit<PageProps, 'status'>) { const input 
 
 function SecurityPage({ status, settings, save, audit, permissions, onPermission }: PageProps & { audit: AuditEntry[]; permissions: Permissions | null; onPermission: (kind: PermissionKind) => Promise<void> }) { const security = settings.security; const patch = (value: Partial<Settings['security']>) => void save({ ...settings, security: { ...security, ...value } }); return <><SettingsCard title="macOS permissions" subtitle="macOS asks you to allow screen recording and input control once. Vision-Pro cannot grant them to itself."><PermissionsGroup permissions={permissions} onPermission={onPermission} /></SettingsCard><SettingsCard title="Security" subtitle="Zero Trust defaults protect every new device and every incoming command."><Group title="Authorization"><Row title="Confirm every connection" subtitle="Trusted devices still require approval" accessory={<Switch label="Confirm every connection" checked={security.confirmEveryConnection} onChange={(confirmEveryConnection) => patch({ confirmEveryConnection })} />} /><Row title="Notifications" subtitle="Notify when a device connects" accessory={<Switch label="Connection notifications" checked={security.notifyOnConnect} onChange={(notifyOnConnect) => patch({ notifyOnConnect })} />} /><NumberSetting label="Session lifetime" suffix="minutes" value={security.sessionMaxMinutes} min={5} max={10080} onChange={(sessionMaxMinutes) => patch({ sessionMaxMinutes })} /><NumberSetting label="Trust expires after" suffix="days" value={security.trustExpiryDays} min={1} max={3650} onChange={(trustExpiryDays) => patch({ trustExpiryDays })} /></Group><Group title="Brute-force protection"><NumberSetting label="Invalid attempts before lock" suffix="attempts" value={security.lockoutThreshold} min={3} max={20} onChange={(lockoutThreshold) => patch({ lockoutThreshold })} /><NumberSetting label="Lockout duration" suffix="minutes" value={security.lockoutMinutes} min={1} max={1440} onChange={(lockoutMinutes) => patch({ lockoutMinutes })} />{status.lockedSources > 0 && <Row icon="alert" title={`${status.lockedSources} blocked source${status.lockedSources === 1 ? '' : 's'}`} accessory={<Button size="sm" onClick={() => void api.unlock()}>Unlock all</Button>} />}</Group></SettingsCard><section className="desktop-card"><CardTitle title="Security log" subtitle="Append-only local history" /><div className="audit-table">{audit.length ? audit.map((entry, i) => <div className="audit-row" key={`${entry.ts}-${i}`}><Badge tone={entry.severity === 'critical' ? 'red' : entry.severity === 'warning' ? 'orange' : undefined}>{entry.severity}</Badge><span>{entry.message}</span><time>{new Date(entry.ts).toLocaleString()}</time></div>) : <div className="desktop-empty">No events recorded.</div>}</div></section></>; }
 
-function NetworkPage({ settings, save }: Omit<PageProps, 'status'>) { const network = settings.network; const patch = (value: Partial<Settings['network']>) => void save({ ...settings, network: { ...network, ...value } }); return <SettingsCard title="Network" subtitle="Local Only is recommended and never exposes the Mac directly to the Internet."><div className="network-modes"><button type="button" aria-pressed={network.mode === 'local-only'} onClick={() => patch({ mode: 'local-only' })}><Icon name="wifi" /><b>Local Only</b><span>Direct iPad ↔ Mac connection on your private network.</span><Badge tone="green">Recommended</Badge></button><button type="button" aria-pressed={network.mode === 'remote-access'} onClick={() => patch({ mode: 'remote-access' })}><Icon name="globe" /><b>Remote Access</b><span>Architecture reserved for strongly authenticated relay access.</span><Badge>Not configured</Badge></button></div><Group title="Discovery"><Row title="Advertise this Mac nearby" accessory={<Switch label="Advertise this Mac nearby" checked={network.advertiseMdns} onChange={(advertiseMdns) => patch({ advertiseMdns })} />} /><Row title="Allow nearby pairing requests" subtitle="Approval on this Mac is always required" accessory={<Switch label="Allow nearby pairing" checked={network.allowNearbyPairing} onChange={(allowNearbyPairing) => patch({ allowNearbyPairing })} />} /><NumberSetting label="Secure local port" suffix="TCP" value={network.httpsPort} min={1024} max={65535} onChange={(httpsPort) => patch({ httpsPort })} /></Group></SettingsCard>; }
+function relayBadge(mode: Settings['network']['mode'], configured: boolean, relay: RelayStatus) {
+  if (mode !== 'remote-access') return <Badge>Off</Badge>;
+  if (!configured) return <Badge tone="orange">Not configured</Badge>;
+  if (relay.state === 'connected') return <Badge tone="green" dot>Connected</Badge>;
+  if (relay.state === 'error') return <Badge tone="red" dot>Unreachable</Badge>;
+  return <Badge tone="orange" dot>Connecting</Badge>;
+}
+
+/** What the user must do on the tablet so that its cable carries the stream. */
+function usbHint(device: UsbTablet): string {
+  if (device.kind === 'android') return 'Sur la tablette : Réglages → Connexions → Point d’accès mobile et modem → activez « Modem USB ». macOS reconnaît le modem USB NCM (les tablettes récentes) ; l’ancien mode RNDIS n’est pas pris en charge.';
+  return 'Sur l’iPad : Réglages → Partage de connexion → activez « Autoriser d’autres utilisateurs », puis touchez « Se fier » si l’iPad le demande (iPad Wi-Fi + Cellular). Aucun pilote n’est nécessaire sur Mac.';
+}
+
+function linkState(link: UsbLink): { tone: 'green' | 'orange'; text: string; action?: string } {
+  if (link.firewall === 'blocked') return { tone: 'orange', text: 'Le coupe-feu de macOS bloque Vision-Pro' };
+  if (link.internet) return { tone: 'orange', text: 'Internet du Mac passe par les données mobiles de la tablette' };
+  return { tone: 'green', text: 'Liaison directe par câble' };
+}
+
+function UsbCard({ usb, sessions, onAllow }: { usb: UsbStatus; sessions: AgentStatus['sessions']; onAllow: (link: UsbLink) => Promise<void> }) {
+  const [busy, setBusy] = useState(false);
+  const link = usb.links[0];
+  if (link) {
+    const state = linkState(link);
+    const onCable = sessions.find((s) => s.link === 'usb' && s.localIp === link.localIp);
+    const blocked = link.firewall === 'blocked';
+    const detail = blocked
+      ? 'Le coupe-feu de macOS empêche la tablette de joindre ce Mac par le câble. Réglages Système → Réseau → Coupe-feu → Options : autorisez les connexions entrantes pour Vision-Pro.'
+      : link.internet
+        ? 'macOS envoie l’Internet de ce Mac par la tablette, au risque de consommer ses données mobiles. Réglages Système → Réseau → ⋯ → Définir l’ordre des services : placez le Wi-Fi avant « iPad USB ». Le flux reste sur le câble.'
+        : onCable ? 'Image, curseur et commandes passent directement par le câble, sans Wi-Fi.' : 'Dès que la tablette se connecte, tout le flux passe par le câble. Une session Wi-Fi en cours bascule automatiquement.';
+    return <section className="usb-card" data-tone={state.tone}>
+      <div className="usb-glyph"><Icon name="cable" size={26} /></div>
+      <div className="usb-copy">
+        <p className="eyebrow">Câble USB</p>
+        <h2>{onCable ? `${onCable.deviceName} diffuse par le câble` : `${link.deviceName} relié par câble`}</h2>
+        <p>{detail}</p>
+        <small className="mono">{link.localIp} · {link.alias}{link.simulated ? ' · simulation' : ''}</small>
+      </div>
+      {state.action ? <Button variant="primary" icon="shield" loading={busy} onClick={() => { setBusy(true); void onAllow(link).finally(() => setBusy(false)); }}>{state.action}</Button> : <Badge tone="green" dot>{onCable ? 'En direct' : 'Prêt'}</Badge>}
+    </section>;
+  }
+  const device = usb.devices[0]!;
+  return <section className="usb-card" data-tone="orange">
+    <div className="usb-glyph"><Icon name="cable" size={26} /></div>
+    <div className="usb-copy">
+      <p className="eyebrow">Câble USB</p>
+      <h2>{device.name} branché</h2>
+      <p>{usbHint(device)}</p>
+    </div>
+    <Badge tone="orange" dot>Action requise</Badge>
+  </section>;
+}
+
+function NetworkPage({ status, settings, save, onAllowUsb }: PageProps & { onAllowUsb: (link: UsbLink) => Promise<void> }) {
+  const network = settings.network;
+  const toast = useToast();
+  const [relayUrl, setRelayUrl] = useState(network.relayUrl ?? '');
+  const [relayToken, setRelayToken] = useState(network.relayToken ?? '');
+  useEffect(() => { setRelayUrl(network.relayUrl ?? ''); setRelayToken(network.relayToken ?? ''); }, [network.relayUrl, network.relayToken]);
+  const patch = (value: Partial<Settings['network']>) => void save({ ...settings, network: { ...network, ...value } });
+  const relay = status.relay;
+  const remote = network.mode === 'remote-access';
+  const dirty = relayUrl.trim() !== (network.relayUrl ?? '') || relayToken.trim() !== (network.relayToken ?? '');
+  const saveRelay = () => {
+    const url = relayUrl.trim();
+    const token = relayToken.trim();
+    if (url && !/^((wss|https):\/\/)?[a-z0-9.-]+(:\d{1,5})?\/?$/i.test(url) && !/^(ws|http):\/\/(127\.0\.0\.1|localhost)(:\d{1,5})?\/?$/i.test(url)) {
+      toast('Enter the relay address, for example relay.example.com.', { icon: 'alert', tone: 'red' });
+      return;
+    }
+    if (token && token.length < 16) {
+      toast('The access token must contain at least 16 characters.', { icon: 'alert', tone: 'red' });
+      return;
+    }
+    patch({ relayUrl: url || null, relayToken: token || null });
+  };
+  const relayTitle = relay.state === 'connected' ? 'Reachable from the Internet' : relay.state === 'error' ? 'Relay unreachable' : relay.state === 'connecting' ? 'Connecting to the relay…' : 'Relay inactive';
+  const relayDetail = relay.state === 'connected' ? (relay.udp ? 'Encrypted media over UDP' : 'Encrypted media over TCP (UDP blocked)') : relay.error ?? (network.relayUrl ? 'Save to connect' : 'Enter your relay address');
+  return <SettingsCard title="Network" subtitle="Local Only never exposes the Mac to the Internet. Remote Access goes through your own relay, with end-to-end encryption.">
+    <div className="network-modes">
+      <button type="button" aria-pressed={network.mode === 'local-only'} onClick={() => patch({ mode: 'local-only' })}><Icon name="wifi" /><b>Local Only</b><span>Direct iPad ↔ Mac connection on your private network.</span><Badge tone="green">Recommended</Badge></button>
+      <button type="button" aria-pressed={remote} onClick={() => patch({ mode: 'remote-access' })}><Icon name="globe" /><b>Remote Access</b><span>Reach this Mac from any network through a Vision-Pro relay. The relay never sees your screen or keystrokes.</span>{relayBadge(network.mode, !!network.relayUrl, relay)}</button>
+    </div>
+    {remote && <Group title="Relay">
+      <label className="text-setting"><span>Relay address</span><input className="vp-input" placeholder="relay.example.com" value={relayUrl} autoCapitalize="off" autoCorrect="off" spellCheck={false} onChange={(event) => setRelayUrl(event.currentTarget.value)} onKeyDown={(event) => { if (event.key === 'Enter' && dirty) saveRelay(); }} /></label>
+      <label className="text-setting"><span>Access token</span><input className="vp-input" type="password" placeholder="Optional" value={relayToken} autoComplete="off" onChange={(event) => setRelayToken(event.currentTarget.value)} onKeyDown={(event) => { if (event.key === 'Enter' && dirty) saveRelay(); }} /></label>
+      <Row icon="globe" title={relayTitle} subtitle={relayDetail} accessory={<Button size="sm" variant={dirty ? 'primary' : 'default'} disabled={!dirty} onClick={saveRelay}>Save</Button>} />
+    </Group>}
+    {remote && <p className="about-note">Pair each iPad once on the local network. It then connects from anywhere: the Mac key is pinned, pairing codes are always required through the relay, and video stays DTLS-SRTP encrypted.</p>}
+    <Group title="Câble USB">
+      <Row icon="cable" title="Diffusion par câble USB" subtitle="Détecte la tablette branchée et fait passer tout le flux par le câble" accessory={<Switch label="Diffusion par câble USB" checked={network.usbDirect} onChange={(usbDirect) => patch({ usbDirect })} />} />
+      {network.usbDirect && status.usb.links.map((link) => <Row key={link.id} icon="tablet" title={link.deviceName} subtitle={`${linkState(link).text} · ${link.localIp} · ${link.alias}`} accessory={linkState(link).action ? <Button size="sm" variant="primary" onClick={() => void onAllowUsb(link)}>{linkState(link).action}</Button> : <Badge tone="green" dot>Actif</Badge>} />)}
+      {network.usbDirect && status.usb.devices.filter((d) => !status.usb.links.some((l) => l.kind === d.kind)).map((device) => <Row key={device.id} icon="tablet" title={`${device.name} branché`} subtitle={usbHint(device)} accessory={<Badge tone="orange" dot>En attente</Badge>} />)}
+      {network.usbDirect && !status.usb.links.length && !status.usb.devices.length && <Row title="Aucune tablette branchée" subtitle="Branchez l’iPad en USB-C ou avec un câble Lightning ; il est détecté instantanément." />}
+    </Group>
+    {network.usbDirect && <p className="about-note">Le câble transporte la connexion chiffrée, l’image et les commandes : aucune box ni Wi-Fi n’est nécessaire. L’iPad crée la liaison réseau par le câble grâce au Partage de connexion ; si le câble est débranché, la session repasse aussitôt par le Wi-Fi.</p>}
+    <Group title="Discovery"><Row title="Advertise this Mac nearby" accessory={<Switch label="Advertise this Mac nearby" checked={network.advertiseMdns} onChange={(advertiseMdns) => patch({ advertiseMdns })} />} /><Row title="Allow nearby pairing requests" subtitle="Approval on this Mac is always required" accessory={<Switch label="Allow nearby pairing" checked={network.allowNearbyPairing} onChange={(allowNearbyPairing) => patch({ allowNearbyPairing })} />} /><NumberSetting label="Secure local port" suffix="TCP" value={network.httpsPort} min={1024} max={65535} onChange={(httpsPort) => patch({ httpsPort })} /></Group></SettingsCard>;
+}
 
 function AdvancedPage({ settings, save }: PageProps) { const advanced = settings.advanced; const patch = (value: Partial<Settings['advanced']>) => void save({ ...settings, advanced: { ...advanced, ...value } }); return <SettingsCard title="Advanced" subtitle="These controls can affect availability and troubleshooting. Secure defaults are recommended."><Group title="Startup"><Row title="Start service with Vision-Pro" accessory={<Switch label="Start service on launch" checked={advanced.startServiceOnLaunch} onChange={(startServiceOnLaunch) => patch({ startServiceOnLaunch })} />} /><Row title="Open at login" subtitle="Adds Vision-Pro to Login Items" accessory={<Switch label="Open at login" checked={advanced.launchAtLogin} onChange={(launchAtLogin) => patch({ launchAtLogin })} />} /></Group><Group title="Diagnostics"><Row title="Verbose local logging" accessory={<Switch label="Verbose local logging" checked={advanced.verboseLogging} onChange={(verboseLogging) => patch({ verboseLogging })} />} /><Row title="Developer loopback endpoint" subtitle="127.0.0.1 only; disabled in normal use" accessory={<Switch label="Developer loopback" checked={advanced.developerLoopback} onChange={(developerLoopback) => patch({ developerLoopback })} />} /></Group></SettingsCard>; }
 
@@ -135,7 +241,10 @@ function PairingBanner({ request, onRespond }: { request: AgentStatus['pendingPa
 
 function ConnectDialog({ info, onRefresh, onClose }: { info: ConnectInfo; onRefresh: () => Promise<void>; onClose: () => void }) {
   const src = `data:image/svg+xml,${encodeURIComponent(info.setupQrSvg ?? info.qrSvg)}`;
-  return <div className="dialog-scrim"><section className="connect-dialog" role="dialog" aria-modal="true" aria-labelledby="connect-title"><div className="connect-head"><div><p className="eyebrow">Secure pairing</p><h2 id="connect-title">Connect your iPad</h2></div><IconButton icon="close" label="Close" onClick={onClose} /></div><div className="connect-grid"><div className="qr-wrap"><img src={src} alt="Vision-Pro secure pairing QR code" /></div><div className="connect-copy"><ol><li>Open Vision-Pro on your iPad.</li><li>Scan this QR code or enter the code below.</li><li>Confirm the matching security code on this Mac.</li></ol><div className="pair-code"><span>PAIRING CODE</span><b>{info.code}</b></div><p className="expires">Expires {formatRelative(info.expiresAt)}</p><Button icon="refresh" onClick={() => void onRefresh()}>New code</Button></div></div><div className="trust-note"><Icon name="shield" /><span><b>Discovery is not authorization.</b> This Mac grants no control until you explicitly approve the request.</span></div></section></div>;
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => { const timer = window.setInterval(() => setNow(Date.now()), 1000); return () => window.clearInterval(timer); }, []);
+  const remaining = info.expiresAt - now;
+  return <div className="dialog-scrim"><section className="connect-dialog" role="dialog" aria-modal="true" aria-labelledby="connect-title"><div className="connect-head"><div><p className="eyebrow">Secure pairing</p><h2 id="connect-title">Connect your iPad</h2></div><IconButton icon="close" label="Close" onClick={onClose} /></div><div className="connect-grid"><div className="qr-wrap"><img src={src} alt="Vision-Pro secure pairing QR code" /></div><div className="connect-copy"><ol><li>Open Vision-Pro on your iPad.</li><li>Scan this QR code or enter the code below.</li><li>Confirm the matching security code on this Mac.</li></ol><div className="pair-code"><span>PAIRING CODE</span><b>{info.code}</b></div><p className="expires">{remaining > 0 ? `Expire dans ${formatDuration(remaining)}` : 'Code expiré — générez-en un nouveau'}</p><Button icon="refresh" onClick={() => void onRefresh()}>New code</Button></div></div><div className="trust-note"><Icon name="shield" /><span><b>Discovery is not authorization.</b> This Mac grants no control until you explicitly approve the request.</span></div></section></div>;
 }
 
 const permissionRows: { kind: PermissionKind; key: keyof Permissions; icon: IconName; title: string; subtitle: string }[] = [

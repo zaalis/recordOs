@@ -35,6 +35,7 @@ fn main() {
         "IOKit",
         "ScreenCaptureKit",
         "Security",
+        "SystemConfiguration",
         "VideoToolbox",
     ] {
         println!("cargo:rustc-link-lib=framework={framework}");

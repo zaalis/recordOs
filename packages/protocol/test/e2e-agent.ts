@@ -62,4 +62,5 @@ await new Promise((r) => setTimeout(r, 300));
 }
 
 console.log('e2e handshake OK');
-process.exit(0);
+// Let the closed WebSockets finish closing: exiting immediately trips a libuv assertion on Windows.
+setTimeout(() => process.exit(0), 300);

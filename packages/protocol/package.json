@@ -10,6 +10,7 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "node --experimental-strip-types --no-warnings test/run.ts"
+    "test": "node --experimental-strip-types --no-warnings test/run.ts",
+    "test:e2e:usb": "node --experimental-strip-types --no-warnings test/e2e-usb.ts"
   }
 }
