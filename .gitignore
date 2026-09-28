@@ -11,3 +11,6 @@ server/data/
 coverage/
 *.pdb
 
+
+# Built installers: regenerate with `npm run package:installer`
+installer/*.exe
