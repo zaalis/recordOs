@@ -125,8 +125,9 @@ pub async fn start_bootstrap(core: Arc<Core>) -> anyhow::Result<(ServerHandle, u
                         continue;
                     }
                     let router = router.clone();
+                    let connection_shutdown = rx.clone();
                     let local = stream.local_addr().unwrap_or(SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)));
-                    tokio::spawn(serve_http(TokioIo::new(stream), peer, local, router, false));
+                    tokio::spawn(serve_http(TokioIo::new(stream), peer, local, router, false, connection_shutdown));
                 }
             }
         }
@@ -142,7 +143,7 @@ async fn accept_loop(
     tls: bool,
     mut shutdown: watch::Receiver<bool>,
 ) {
-    let router = app_router(core.clone(), tls);
+    let router = app_router(core.clone(), tls, shutdown.clone());
     loop {
         let (stream, peer) = tokio::select! {
             _ = shutdown.changed() => break,
@@ -179,20 +180,38 @@ async fn accept_loop(
             continue;
         };
         let router = router.clone();
+        let connection_shutdown = shutdown.clone();
         if tls {
             let Some(config) = core.tls.read().clone() else {
                 continue;
             };
             tokio::spawn(async move {
                 let acceptor = tokio_rustls::TlsAcceptor::from(config);
-                if let Ok(Ok(tls_stream)) =
-                    tokio::time::timeout(Duration::from_secs(10), acceptor.accept(stream)).await
-                {
-                    serve_http(TokioIo::new(tls_stream), peer, local, router, true).await
+                let accepted = tokio::select! {
+                    _ = wait_for_shutdown(connection_shutdown.clone()) => return,
+                    accepted = tokio::time::timeout(Duration::from_secs(10), acceptor.accept(stream)) => accepted,
+                };
+                if let Ok(Ok(tls_stream)) = accepted {
+                    serve_http(
+                        TokioIo::new(tls_stream),
+                        peer,
+                        local,
+                        router,
+                        true,
+                        connection_shutdown,
+                    )
+                    .await
                 }
             });
         } else {
-            tokio::spawn(serve_http(TokioIo::new(stream), peer, local, router, false));
+            tokio::spawn(serve_http(
+                TokioIo::new(stream),
+                peer,
+                local,
+                router,
+                false,
+                connection_shutdown,
+            ));
         }
     }
 }
@@ -203,6 +222,7 @@ async fn serve_http<I>(
     local: SocketAddr,
     router: Router,
     _tls: bool,
+    shutdown: watch::Receiver<bool>,
 ) where
     I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
@@ -212,21 +232,25 @@ async fn serve_http<I>(
         let router = router.clone();
         async move { router.oneshot(request.map(Body::new)).await }
     });
-    let _ = hyper::server::conn::http1::Builder::new()
+    let connection = hyper::server::conn::http1::Builder::new()
         .timer(hyper_util::rt::TokioTimer::new())
         .header_read_timeout(Duration::from_secs(10))
         .serve_connection(io, service)
-        .with_upgrades()
-        .await;
+        .with_upgrades();
+    tokio::select! {
+        _ = wait_for_shutdown(shutdown.clone()) => {},
+        _ = connection => {},
+    }
 }
 
-fn app_router(core: Arc<Core>, tls: bool) -> Router {
+fn app_router(core: Arc<Core>, tls: bool, shutdown: watch::Receiver<bool>) -> Router {
     let relay_core = core.clone();
     Router::new()
         .route("/ws", get(ws_handler))
         .route("/api/info", get(info_handler))
         .route("/api/nearby", get(nearby_handler))
         .fallback(get(static_handler))
+        .layer(Extension(shutdown))
         .layer(middleware::from_fn(move |req, next| {
             // The cached iPad app keeps this policy while away from home, so it must already allow
             // the configured relay.
@@ -345,6 +369,7 @@ async fn ws_handler(
     State(core): State<Arc<Core>>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Extension(LocalAddr(local)): Extension<LocalAddr>,
+    Extension(shutdown): Extension<watch::Receiver<bool>>,
     headers: HeaderMap,
 ) -> Response<Body> {
     if let Some(origin) = headers.get(header::ORIGIN) {
@@ -369,8 +394,16 @@ async fn ws_handler(
                 peer.ip(),
                 Route::Direct,
                 Some(local.ip()),
+                shutdown,
             )
         })
+}
+
+async fn wait_for_shutdown(mut shutdown: watch::Receiver<bool>) {
+    if *shutdown.borrow() {
+        return;
+    }
+    let _ = shutdown.changed().await;
 }
 
 struct AxumTransport(WebSocket);

@@ -130,10 +130,18 @@ export function Session() {
 
   useEffect(() => {
     const video = videoRef.current;
-    if (!video || !snapshot.stream) return;
+    if (!video) return;
+    const freeze = freezeRef.current;
+    if (!snapshot.stream) {
+      // A remote or local disconnect can leave this component mounted briefly while the
+      // connection overlay takes over. Detach the old MediaStream and frozen frame immediately.
+      video.pause();
+      video.srcObject = null;
+      if (freeze) freeze.hidden = true;
+      return;
+    }
     // A new stream (cable plugged or unplugged, reconnection) starts black: keep the last
     // picture on screen until its first frame is decoded.
-    const freeze = freezeRef.current;
     if (freeze && video.srcObject && video.srcObject !== snapshot.stream && video.videoWidth > 0) {
       try {
         freeze.width = video.videoWidth;

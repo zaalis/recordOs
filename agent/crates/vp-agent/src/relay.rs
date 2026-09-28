@@ -339,8 +339,7 @@ pub fn normalize_url(input: &str) -> Option<String> {
         return None;
     }
     let host = host_of(authority);
-    if !secure && !(host == "localhost" || host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback()))
-    {
+    if !(secure || host == "localhost" || host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())) {
         return None;
     }
     Some(format!(
@@ -425,9 +424,10 @@ pub async fn run(
     let mut backoff = Duration::from_secs(1);
     loop {
         let started = Instant::now();
+        let session_shutdown = shutdown.clone();
         let outcome = tokio::select! {
             _ = shutdown.changed() => break,
-            outcome = session(&core, generation, &url, token.as_deref()) => outcome,
+            outcome = session(&core, generation, &url, token.as_deref(), session_shutdown) => outcome,
         };
         let was_connected = hub.status.read().state == RelayState::Connected;
         hub.disconnect(generation);
@@ -481,6 +481,7 @@ async fn session(
     generation: u64,
     url: &str,
     token: Option<&str>,
+    shutdown: watch::Receiver<bool>,
 ) -> Result<(), String> {
     let socket = connect(&format!("{url}/v1/agent"))
         .await
@@ -527,6 +528,7 @@ async fn session(
 
     let (control_tx, mut control_rx) = mpsc::channel::<Control>(4096);
     let udp = start_udp(url, &reply).await;
+    let udp_shutdown = shutdown.clone();
     let udp_task = udp.as_ref().map(|(socket, relay_addr, token)| {
         tokio::spawn(udp_loop(
             core.relay.clone(),
@@ -534,6 +536,7 @@ async fn session(
             socket.clone(),
             *relay_addr,
             *token,
+            udp_shutdown,
         ))
     });
     core.relay.attach(
@@ -571,7 +574,7 @@ async fn session(
                             Some("incoming") => {
                                 if let Some(ticket) = message["ticket"].as_str().filter(|t| t.len() == 32 && t.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')) {
                                     let ip = message["ip"].as_str().and_then(|ip| ip.parse().ok()).unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
-                                    tokio::spawn(accept(core.clone(), format!("{url}/v1/accept/{ticket}"), ip));
+                                    tokio::spawn(accept(core.clone(), format!("{url}/v1/accept/{ticket}"), ip, shutdown.clone()));
                                 }
                             }
                             Some("turn.credential") => {
@@ -643,6 +646,7 @@ async fn udp_loop(
     socket: Arc<UdpSocket>,
     relay: SocketAddr,
     token: [u8; 32],
+    shutdown: watch::Receiver<bool>,
 ) {
     let hello = {
         let mut frame = vec![wire::HELLO];
@@ -661,6 +665,7 @@ async fn udp_loop(
     let mut buf = vec![0u8; 65_536];
     loop {
         tokio::select! {
+            _ = wait_for_shutdown(shutdown.clone()) => break,
             _ = tick.tick() => {
                 let bound = last_ack.is_some_and(|at| at.elapsed() < UDP_STALE);
                 if !hub.current(generation) {
@@ -693,19 +698,38 @@ async fn udp_loop(
     }
 }
 
-async fn accept(core: Arc<Core>, url: String, ip: IpAddr) {
+async fn accept(core: Arc<Core>, url: String, ip: IpAddr, shutdown: watch::Receiver<bool>) {
     if core.settings.read().network.mode != crate::config::NetworkMode::RemoteAccess {
         return;
     }
     if let Verdict::LockedOut(_) | Verdict::RateLimited(_) = core.guard.check_connection(ip) {
         return;
     }
-    match connect(&url).await {
+    let socket = tokio::select! {
+        _ = wait_for_shutdown(shutdown.clone()) => return,
+        result = connect(&url) => result,
+    };
+    match socket {
         Ok(socket) => {
-            signaling::run(core, TungsteniteTransport(socket), ip, Route::Relay, None).await
+            signaling::run(
+                core,
+                TungsteniteTransport(socket),
+                ip,
+                Route::Relay,
+                None,
+                shutdown,
+            )
+            .await
         }
         Err(error) => tracing::debug!(%error, "relay accept failed"),
     }
+}
+
+async fn wait_for_shutdown(mut shutdown: watch::Receiver<bool>) {
+    if *shutdown.borrow() {
+        return;
+    }
+    let _ = shutdown.changed().await;
 }
 
 struct TungsteniteTransport(Socket);

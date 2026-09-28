@@ -190,6 +190,19 @@ fn keyframe_interval(fps: u32) -> u32 {
     fps.saturating_mul(10)
 }
 
+/// Consume one slot granted by `METransformNeedInput`.
+///
+/// This is deliberately independent of whether an earlier frame has produced output yet: some
+/// asynchronous MFTs only release that output after receiving the next input.
+fn take_pending_input(pending_inputs: &mut u32) -> bool {
+    if *pending_inputs == 0 {
+        false
+    } else {
+        *pending_inputs -= 1;
+        true
+    }
+}
+
 /// Encoder controls for interactive streaming.
 ///
 /// Applied before the media types are set: hardware encoders commonly accept sequence-level
@@ -589,9 +602,8 @@ impl MfEncoder {
             // completes later is collected by `poll`.
             let mut output = vec![];
             self.drain_events(events, &mut output)?;
-            if self.pending_inputs > 0 {
+            if take_pending_input(&mut self.pending_inputs) {
                 self.transform.ProcessInput(self.input_id, sample, 0)?;
-                self.pending_inputs -= 1;
                 self.in_flight = (self.in_flight + 1).min(8);
                 self.last_input = Some(std::time::Instant::now());
                 self.input_dropped = false;
@@ -749,7 +761,26 @@ fn contains_parameter_sets(data: &[u8], codec: CodecId) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{keyframe_interval, low_latency_buffer_size};
+    use super::{keyframe_interval, low_latency_buffer_size, take_pending_input};
+
+    #[test]
+    fn submits_the_next_input_before_the_previous_output_is_ready() {
+        // Async MFTs may signal NEED_INPUT while the prior output is still in flight. The
+        // capture loop must feed that slot immediately; waiting for HAVE_OUTPUT can serialize
+        // the encoder at the old 250 ms timeout (about four frames per second).
+        let mut pending_inputs = 1;
+        let previous_output_ready = false;
+        assert!(!previous_output_ready);
+        assert!(take_pending_input(&mut pending_inputs));
+        assert_eq!(pending_inputs, 0);
+    }
+
+    #[test]
+    fn does_not_submit_without_a_need_input_event() {
+        let mut pending_inputs = 0;
+        assert!(!take_pending_input(&mut pending_inputs));
+        assert_eq!(pending_inputs, 0);
+    }
 
     #[test]
     fn periodic_keyframes_are_ten_seconds_apart() {

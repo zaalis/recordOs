@@ -12,7 +12,7 @@ use crate::events::{AgentEvent, PairingRequestInfo};
 use crate::media::{MediaContext, MediaHandle, MediaRequest};
 use crate::protocol::{ClientInit, ClientProve, DeviceRotate, PairRequest, RtcOffer};
 use crate::security::Severity;
-use crate::session::{EndReason, Link, SessionCommand, SessionInfo};
+use crate::session::{AuthorizationEpoch, EndReason, Link, SessionCommand, SessionInfo};
 use crate::store::{DeviceStatus, Permission};
 use crate::util::{b64u, from_b64u, now_ms, random_bytes, random_token, sanitize_name};
 use p256::ecdh::EphemeralSecret;
@@ -22,11 +22,12 @@ use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio::time::{timeout, Instant};
 
 const STEP_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_FRAME: usize = 96 * 1024;
+const SIGNAL_SEND_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// How the iPad reached this PC. Relayed sessions come from the Internet: pairing always needs
 /// a code or QR proof, and media goes through the relay's TURN service.
@@ -61,6 +62,7 @@ struct Ctx<'a, T: SignalTransport> {
     core: &'a Arc<Core>,
     transport: &'a mut T,
     ip: IpAddr,
+    shutdown: watch::Receiver<bool>,
 }
 
 /// Physical path of a new session: a connection arriving on a cable address is a USB session.
@@ -76,10 +78,13 @@ fn link_of(core: &Core, route: Route, local: Option<IpAddr>) -> Link {
 
 impl<T: SignalTransport> Ctx<'_, T> {
     async fn send_plain(&mut self, value: Value) -> Result<(), Abort> {
-        self.transport
-            .send_text(value.to_string())
-            .await
-            .map_err(|_| Abort::Closed)
+        timeout(
+            SIGNAL_SEND_TIMEOUT,
+            self.transport.send_text(value.to_string()),
+        )
+        .await
+        .map_err(|_| Abort::Closed)?
+        .map_err(|_| Abort::Closed)
     }
 
     async fn fail(&mut self, code: &'static str, retry_after: Option<Duration>) -> Abort {
@@ -109,10 +114,14 @@ impl<T: SignalTransport> Ctx<'_, T> {
     }
 
     async fn recv_plain(&mut self) -> Result<Value, Abort> {
-        let text = match timeout(STEP_TIMEOUT, self.transport.recv_text()).await {
-            Ok(Some(Ok(text))) => text,
-            Ok(_) => return Err(Abort::Closed),
-            Err(_) => return Err(self.fail("expired", None).await),
+        let shutdown = self.shutdown.clone();
+        let text = tokio::select! {
+            _ = wait_for_shutdown(shutdown) => return Err(Abort::Closed),
+            result = timeout(STEP_TIMEOUT, self.transport.recv_text()) => match result {
+                Ok(Some(Ok(text))) => text,
+                Ok(_) => return Err(Abort::Closed),
+                Err(_) => return Err(self.fail("expired", None).await),
+            }
         };
         if text.len() > MAX_FRAME {
             self.penalize("oversized message");
@@ -135,7 +144,10 @@ async fn send_secure<T: SignalTransport>(
 ) -> Result<(), Abort> {
     for frame in channel.seal(&value) {
         let text = serde_json::to_string(&frame).expect("frame json");
-        transport.send_text(text).await.map_err(|_| Abort::Closed)?;
+        timeout(SIGNAL_SEND_TIMEOUT, transport.send_text(text))
+            .await
+            .map_err(|_| Abort::Closed)?
+            .map_err(|_| Abort::Closed)?;
     }
     Ok(())
 }
@@ -185,23 +197,38 @@ pub async fn run<T: SignalTransport>(
     ip: IpAddr,
     route: Route,
     local: Option<IpAddr>,
+    shutdown: watch::Receiver<bool>,
 ) {
+    let handshake_epoch = core.sessions.handshake_epoch();
     let Ok(_permit) = core.handshake_slots.clone().try_acquire_owned() else {
-        let _ = transport
-            .send_text(
+        let _ = timeout(
+            SIGNAL_SEND_TIMEOUT,
+            transport.send_text(
                 json!({"t": "error", "code": "rate_limited", "retryAfterMs": 2000}).to_string(),
-            )
-            .await;
-        transport.close().await;
+            ),
+        )
+        .await;
+        let _ = timeout(Duration::from_secs(1), transport.close()).await;
         return;
     };
-    let result = session(&core, &mut transport, ip, route, local, _permit).await;
+    let result = session(
+        &core,
+        &mut transport,
+        ip,
+        route,
+        local,
+        _permit,
+        shutdown,
+        handshake_epoch,
+    )
+    .await;
     if let Err(Abort::Client(code)) = &result {
         tracing::debug!(%ip, code, "signaling ended");
     }
-    transport.close().await;
+    let _ = timeout(Duration::from_secs(1), transport.close()).await;
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn session<T: SignalTransport>(
     core: &Arc<Core>,
     transport: &mut T,
@@ -209,11 +236,14 @@ async fn session<T: SignalTransport>(
     route: Route,
     local: Option<IpAddr>,
     permit: tokio::sync::OwnedSemaphorePermit,
+    shutdown: watch::Receiver<bool>,
+    handshake_epoch: crate::session::HandshakeEpoch,
 ) -> Result<(), Abort> {
     let mut ctx = Ctx {
         core,
         transport,
         ip,
+        shutdown,
     };
     if let Some(remaining) = core.guard.locked_for(ip) {
         return Err(ctx.fail("locked_out", Some(remaining)).await);
@@ -275,6 +305,12 @@ async fn session<T: SignalTransport>(
         ctx.penalize("device id mismatch");
         return Err(ctx.fail("protocol", None).await);
     }
+    let Some(authorization_epoch) = core
+        .sessions
+        .authorization_epoch(&init.device_id, handshake_epoch)
+    else {
+        return Err(Abort::Closed);
+    };
 
     // --- reveal ---
     let transcript = crypto::transcript(&crypto::TranscriptInput {
@@ -364,7 +400,12 @@ async fn session<T: SignalTransport>(
         }
         (_, Some(_)) => {}
         ("pair", None) => {
-            let request = match recv_secure(ctx.transport, &mut channel, STEP_TIMEOUT).await {
+            let shutdown = ctx.shutdown.clone();
+            let incoming = tokio::select! {
+                _ = wait_for_shutdown(shutdown) => return Err(Abort::Closed),
+                incoming = recv_secure(ctx.transport, &mut channel, STEP_TIMEOUT) => incoming,
+            };
+            let request = match incoming {
                 Incoming::Message(v) => serde_json::from_value::<PairRequest>(v)
                     .ok()
                     .filter(|r| r.t == "pair.request"),
@@ -420,7 +461,15 @@ async fn session<T: SignalTransport>(
             created_at: now_ms(),
             expires_at: now_ms() + timeout_secs * 1000,
         };
-        let Some(decision) = core.pairing.begin(info.clone()) else {
+        let Some(decision) =
+            core.sessions
+                .with_current_authorization(&init.device_id, authorization_epoch, || {
+                    core.pairing.begin(info.clone())
+                })
+        else {
+            return Err(Abort::Closed);
+        };
+        let Some(decision) = decision else {
             return Err(ctx
                 .fail("pairing_busy", Some(Duration::from_secs(10)))
                 .await);
@@ -442,6 +491,7 @@ async fn session<T: SignalTransport>(
         .await?;
 
         // Wait for the PC user, the timeout, or the iPad giving up — whichever comes first.
+        let shutdown = ctx.shutdown.clone();
         let outcome = tokio::select! {
             result = decision => match result {
                 Ok(true) => "approved",
@@ -452,6 +502,7 @@ async fn session<T: SignalTransport>(
             },
             _ = tokio::time::sleep(Duration::from_secs(timeout_secs)) => "expired",
             _ = wait_for_close(ctx.transport, &mut channel) => "cancelled",
+            _ = wait_for_shutdown(shutdown) => "cancelled",
         };
         core.pairing.clear(&info.id);
         let _ = core.events.send(AgentEvent::PairingResolved {
@@ -496,23 +547,28 @@ async fn session<T: SignalTransport>(
             return Err(Abort::Client("denied"));
         }
 
-        {
-            let mut devices = core.devices.write();
-            if method == "reconfirm" {
-                devices.set_trusted(&init.device_id);
-            } else {
-                devices.insert_paired(
-                    &init.device_id,
-                    &device_name,
-                    &init.device_kind,
-                    &device_pub,
-                    method,
-                    &ip.to_string(),
-                );
-            }
-            if let Err(error) = devices.save(&identity) {
-                tracing::error!(%error, "failed to persist device store");
-            }
+        let persisted =
+            core.sessions
+                .with_current_authorization(&init.device_id, authorization_epoch, || {
+                    let mut devices = core.devices.write();
+                    if method == "reconfirm" {
+                        devices.set_trusted(&init.device_id);
+                    } else {
+                        devices.insert_paired(
+                            &init.device_id,
+                            &device_name,
+                            &init.device_kind,
+                            &device_pub,
+                            method,
+                            &ip.to_string(),
+                        );
+                    }
+                    if let Err(error) = devices.save(&identity) {
+                        tracing::error!(%error, "failed to persist device store");
+                    }
+                });
+        if persisted.is_none() {
+            return Err(Abort::Closed);
         }
         if method == "qr" {
             core.pairing.consume_token();
@@ -536,6 +592,7 @@ async fn session<T: SignalTransport>(
 
     core.guard.record_success(ip);
     drop(permit);
+    let shutdown = ctx.shutdown.clone();
     run_session(
         core,
         ctx.transport,
@@ -545,6 +602,8 @@ async fn session<T: SignalTransport>(
         local,
         &init,
         &keys.session_id,
+        shutdown,
+        authorization_epoch,
     )
     .await
 }
@@ -575,6 +634,13 @@ async fn wait_for_close<T: SignalTransport>(transport: &mut T, channel: &mut Sec
     }
 }
 
+async fn wait_for_shutdown(mut shutdown: watch::Receiver<bool>) {
+    if *shutdown.borrow() {
+        return;
+    }
+    let _ = shutdown.changed().await;
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_session<T: SignalTransport>(
     core: &Arc<Core>,
@@ -585,6 +651,8 @@ async fn run_session<T: SignalTransport>(
     local: Option<IpAddr>,
     init: &ClientInit,
     session_id: &str,
+    shutdown: watch::Receiver<bool>,
+    authorization_epoch: AuthorizationEpoch,
 ) -> Result<(), Abort> {
     let identity = core.identity.read().clone();
     let settings = core.settings.read().clone();
@@ -613,17 +681,13 @@ async fn run_session<T: SignalTransport>(
             }
         }
     };
-    let record = {
-        let mut devices = core.devices.write();
-        devices.touch(&init.device_id, &ip.to_string());
-        let _ = devices.save(&identity);
-        devices.get(&init.device_id).cloned()
-    };
+    let record = core.devices.read().get(&init.device_id).cloned();
     let Some(record) = record else {
         return Err(Abort::Client("device vanished"));
     };
 
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<SessionCommand>(8);
+    let (end_tx, mut end_rx) = watch::channel(None);
     let info = core.sessions.register(
         SessionInfo {
             id: session_id.to_string(),
@@ -643,7 +707,20 @@ async fn run_session<T: SignalTransport>(
             local_ip: local_v4.map(|ip| ip.to_string()),
         },
         cmd_tx,
+        end_tx,
+        authorization_epoch,
     );
+    let Some(info) = info else {
+        if let Some(credential) = &relay_media {
+            core.relay.close_route(credential.peer);
+        }
+        return Err(Abort::Client("disconnected before session start"));
+    };
+    {
+        let mut devices = core.devices.write();
+        devices.touch(&init.device_id, &ip.to_string());
+        let _ = devices.save(&identity);
+    }
     let _ = core.events.send(AgentEvent::SessionsChanged);
     if settings.security.notify_on_connect {
         core.audit
@@ -702,6 +779,14 @@ async fn run_session<T: SignalTransport>(
         let deadline = Instant::now() + max_duration;
         let reason = loop {
             tokio::select! {
+                _ = wait_for_shutdown(shutdown.clone()) => break EndReason::Stopped,
+                ended = end_rx.changed() => match ended {
+                    Ok(()) => match *end_rx.borrow() {
+                        Some(reason) => break reason,
+                        None => continue,
+                    },
+                    Err(_) => break EndReason::Shutdown,
+                },
                 incoming = transport.recv_text() => {
                     let text = match incoming {
                         Some(Ok(text)) => text,
@@ -778,12 +863,17 @@ async fn run_session<T: SignalTransport>(
                                 core.guard.record_failure(ip);
                                 break EndReason::Error;
                             }
-                            let new_id = {
+                            let new_id = core.sessions.end_device_with(
+                                &record.id,
+                                EndReason::Replaced,
+                                || {
+                                core.pairing.cancel_pending_device(&record.id);
                                 let mut devices = core.devices.write();
                                 let id = devices.rotate_key(&record.id, new_pub.as_ref().unwrap());
                                 let _ = devices.save(&identity);
                                 id
-                            };
+                                },
+                            ).0;
                             match new_id {
                                 Some(id) => {
                                     core.audit.record(Severity::Notice, "device.key-rotated", format!("{} rotated its device key.", record.name)).device(&id, &record.name);
@@ -802,7 +892,6 @@ async fn run_session<T: SignalTransport>(
                     }
                 }
                 command = cmd_rx.recv() => match command {
-                    Some(SessionCommand::End(reason)) => break reason,
                     Some(SessionCommand::SetPermission(permission)) => {
                         control_allowed.store(permission == Permission::Control, Ordering::SeqCst);
                         info.write().permission = permission;
@@ -822,7 +911,15 @@ async fn run_session<T: SignalTransport>(
         if let Some(mut handle) = media.take() {
             stop_media(&mut handle);
         }
-        let _ = send_secure(transport, &mut channel, json!({ "t": "session.end", "reason": reason.as_str() })).await;
+        let _ = timeout(
+            Duration::from_secs(1),
+            send_secure(
+                transport,
+                &mut channel,
+                json!({ "t": "session.end", "reason": reason.as_str() }),
+            ),
+        )
+        .await;
         Ok::<EndReason, Abort>(reason)
     }
     .await;

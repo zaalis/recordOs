@@ -3,11 +3,46 @@
 
 use crate::protocol::{AgentStats, AppliedVideo};
 use crate::store::Permission;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AuthorizationEpoch {
+    global: u64,
+    device: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HandshakeEpoch {
+    global: u64,
+    sequence: u64,
+}
+
+#[derive(Default)]
+struct DeviceEpoch {
+    generation: u64,
+    changed_at: u64,
+}
+
+#[derive(Default)]
+struct Epochs {
+    global: u64,
+    sequence: u64,
+    devices: HashMap<String, DeviceEpoch>,
+}
+
+impl Epochs {
+    fn end_device(&mut self, device_id: &str) {
+        self.sequence = self.sequence.wrapping_add(1);
+        let sequence = self.sequence;
+        let device = self.devices.entry(device_id.to_string()).or_default();
+        device.generation = device.generation.wrapping_add(1);
+        device.changed_at = sequence;
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -52,7 +87,6 @@ pub enum Link {
 
 #[derive(Debug)]
 pub enum SessionCommand {
-    End(EndReason),
     SetPermission(Permission),
     /// A cable path to this PC appeared; the iPad may move its session to it.
     UsbAvailable(Vec<String>),
@@ -82,11 +116,14 @@ pub struct SessionInfo {
 pub struct SessionEntry {
     pub info: Arc<RwLock<SessionInfo>>,
     pub commands: mpsc::Sender<SessionCommand>,
+    /// Terminal requests must not compete with best-effort control updates in `commands`.
+    pub end: watch::Sender<Option<EndReason>>,
 }
 
 #[derive(Default)]
 pub struct SessionRegistry {
     sessions: RwLock<HashMap<String, SessionEntry>>,
+    epochs: Mutex<Epochs>,
 }
 
 impl SessionRegistry {
@@ -95,14 +132,26 @@ impl SessionRegistry {
         &self,
         info: SessionInfo,
         commands: mpsc::Sender<SessionCommand>,
-    ) -> Arc<RwLock<SessionInfo>> {
+        end: watch::Sender<Option<EndReason>>,
+        authorization_epoch: AuthorizationEpoch,
+    ) -> Option<Arc<RwLock<SessionInfo>>> {
+        // Serialize final session admission against disconnect, revoke, and disconnect-all.
+        let mut epochs = self.epochs.lock();
+        if epochs.global != authorization_epoch.global
+            || epochs
+                .devices
+                .get(&info.device_id)
+                .map_or(0, |epoch| epoch.generation)
+                != authorization_epoch.device
+        {
+            return None;
+        }
+        epochs.end_device(&info.device_id);
         let shared = Arc::new(RwLock::new(info.clone()));
         let mut map = self.sessions.write();
         for entry in map.values() {
             if entry.info.read().device_id == info.device_id {
-                let _ = entry
-                    .commands
-                    .try_send(SessionCommand::End(EndReason::Replaced));
+                entry.end.send_replace(Some(EndReason::Replaced));
             }
         }
         map.insert(
@@ -110,9 +159,10 @@ impl SessionRegistry {
             SessionEntry {
                 info: shared.clone(),
                 commands,
+                end,
             },
         );
-        shared
+        Some(shared)
     }
 
     pub fn unregister(&self, id: &str) {
@@ -135,24 +185,71 @@ impl SessionRegistry {
     }
 
     pub fn end_session(&self, id: &str, reason: EndReason) -> bool {
-        self.sessions
-            .read()
-            .get(id)
-            .is_some_and(|e| e.commands.try_send(SessionCommand::End(reason)).is_ok())
+        let mut epochs = self.epochs.lock();
+        let sessions = self.sessions.read();
+        sessions.get(id).is_some_and(|e| {
+            let device_id = e.info.read().device_id.clone();
+            epochs.end_device(&device_id);
+            e.end.send_replace(Some(reason));
+            true
+        })
     }
 
     pub fn end_device(&self, device_id: &str, reason: EndReason) -> usize {
+        self.end_device_with(device_id, reason, || ()).1
+    }
+
+    /// Serialize an authorization-store mutation with device disconnect/revoke.
+    /// The operation runs while the generation lock is held, so a stale pairing
+    /// approval cannot re-create trust after a concurrent revoke.
+    pub fn end_device_with<T>(
+        &self,
+        device_id: &str,
+        reason: EndReason,
+        operation: impl FnOnce() -> T,
+    ) -> (T, usize) {
+        let mut epochs = self.epochs.lock();
+        epochs.end_device(device_id);
+        let result = operation();
         let map = self.sessions.read();
-        map.values()
+        let count = map
+            .values()
             .filter(|e| e.info.read().device_id == device_id)
-            .filter(|e| e.commands.try_send(SessionCommand::End(reason)).is_ok())
-            .count()
+            .filter(|e| {
+                e.end.send_replace(Some(reason));
+                true
+            })
+            .count();
+        (result, count)
+    }
+
+    /// Run an authorization write only if no relevant disconnect/revoke raced
+    /// the handshake. Lock ordering is epochs -> device store throughout.
+    pub fn with_current_authorization<T>(
+        &self,
+        device_id: &str,
+        authorization_epoch: AuthorizationEpoch,
+        operation: impl FnOnce() -> T,
+    ) -> Option<T> {
+        let epochs = self.epochs.lock();
+        let current_device = epochs.devices.get(device_id);
+        if epochs.global != authorization_epoch.global
+            || current_device.map_or(0, |epoch| epoch.generation) != authorization_epoch.device
+        {
+            return None;
+        }
+        Some(operation())
     }
 
     pub fn end_all(&self, reason: EndReason) -> usize {
+        let mut epochs = self.epochs.lock();
+        epochs.global = epochs.global.wrapping_add(1);
         let map = self.sessions.read();
         map.values()
-            .filter(|e| e.commands.try_send(SessionCommand::End(reason)).is_ok())
+            .filter(|e| {
+                e.end.send_replace(Some(reason));
+                true
+            })
             .count()
     }
 
@@ -161,7 +258,10 @@ impl SessionRegistry {
         let map = self.sessions.read();
         map.values()
             .filter(|e| e.info.read().local_ip.as_deref() == Some(local_ip))
-            .filter(|e| e.commands.try_send(SessionCommand::End(reason)).is_ok())
+            .filter(|e| {
+                e.end.send_replace(Some(reason));
+                true
+            })
             .count()
     }
 
@@ -196,5 +296,211 @@ impl SessionRegistry {
             .read()
             .values()
             .any(|e| e.info.read().device_id == device_id)
+    }
+
+    pub fn handshake_epoch(&self) -> HandshakeEpoch {
+        let epochs = self.epochs.lock();
+        HandshakeEpoch {
+            global: epochs.global,
+            sequence: epochs.sequence,
+        }
+    }
+
+    pub fn authorization_epoch(
+        &self,
+        device_id: &str,
+        handshake: HandshakeEpoch,
+    ) -> Option<AuthorizationEpoch> {
+        let epochs = self.epochs.lock();
+        let device = epochs.devices.get(device_id);
+        if epochs.global != handshake.global
+            || device.is_some_and(|epoch| epoch.changed_at > handshake.sequence)
+        {
+            return None;
+        }
+        Some(AuthorizationEpoch {
+            global: handshake.global,
+            device: device.map_or(0, |epoch| epoch.generation),
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn session_info(id: &str, device_id: &str) -> SessionInfo {
+        SessionInfo {
+            id: id.to_string(),
+            device_id: device_id.to_string(),
+            device_name: "iPad".to_string(),
+            device_kind: "tablet".to_string(),
+            ip: "192.168.1.5".to_string(),
+            started_at: 1,
+            permission: Permission::View,
+            streaming: false,
+            video: None,
+            stats: None,
+            rtt_ms: None,
+            active_app: None,
+            via_relay: false,
+            link: Link::Lan,
+            local_ip: Some("192.168.1.2".to_string()),
+        }
+    }
+
+    #[test]
+    fn terminal_signal_is_not_lost_when_the_command_queue_is_full() {
+        let registry = SessionRegistry::default();
+        let (commands, _command_rx) = mpsc::channel(1);
+        commands
+            .try_send(SessionCommand::SetPermission(Permission::Control))
+            .unwrap();
+        let (end, end_rx) = watch::channel(None);
+        let epoch = registry
+            .authorization_epoch("device-1", registry.handshake_epoch())
+            .unwrap();
+        registry
+            .register(session_info("session-1", "device-1"), commands, end, epoch)
+            .unwrap();
+
+        assert_eq!(registry.end_all(EndReason::User), 1);
+        assert_eq!(*end_rx.borrow(), Some(EndReason::User));
+    }
+
+    #[test]
+    fn replacing_a_device_session_signals_the_old_session() {
+        let registry = SessionRegistry::default();
+        let (old_commands, _old_rx) = mpsc::channel(1);
+        let (old_end, old_end_rx) = watch::channel(None);
+        let epoch = registry
+            .authorization_epoch("device-1", registry.handshake_epoch())
+            .unwrap();
+        registry
+            .register(
+                session_info("old", "device-1"),
+                old_commands,
+                old_end,
+                epoch,
+            )
+            .unwrap();
+        let epoch = registry
+            .authorization_epoch("device-1", registry.handshake_epoch())
+            .unwrap();
+        let (new_commands, _new_rx) = mpsc::channel(1);
+        let (new_end, _new_end_rx) = watch::channel(None);
+
+        registry
+            .register(
+                session_info("new", "device-1"),
+                new_commands,
+                new_end,
+                epoch,
+            )
+            .unwrap();
+
+        assert_eq!(*old_end_rx.borrow(), Some(EndReason::Replaced));
+        assert_eq!(registry.count(), 2);
+    }
+
+    #[test]
+    fn disconnect_prevents_an_in_flight_handshake_from_registering() {
+        let registry = SessionRegistry::default();
+        let handshake = registry.handshake_epoch();
+        let epoch = registry.authorization_epoch("device-1", handshake).unwrap();
+        registry.end_device("device-1", EndReason::User);
+        assert!(registry
+            .authorization_epoch("device-1", handshake)
+            .is_none());
+        let (commands, _command_rx) = mpsc::channel(1);
+        let (end, _end_rx) = watch::channel(None);
+
+        assert!(registry
+            .register(session_info("session-1", "device-1"), commands, end, epoch)
+            .is_none());
+        assert_eq!(registry.count(), 0);
+    }
+
+    #[test]
+    fn disconnect_all_prevents_every_in_flight_handshake_from_registering() {
+        let registry = SessionRegistry::default();
+        let handshake = registry.handshake_epoch();
+        let epoch = registry.authorization_epoch("device-1", handshake).unwrap();
+        registry.end_all(EndReason::User);
+        assert!(registry
+            .authorization_epoch("device-1", handshake)
+            .is_none());
+        let (commands, _command_rx) = mpsc::channel(1);
+        let (end, _end_rx) = watch::channel(None);
+
+        assert!(registry
+            .register(session_info("session-1", "device-1"), commands, end, epoch)
+            .is_none());
+        assert_eq!(registry.count(), 0);
+    }
+
+    #[test]
+    fn authorization_write_is_rejected_after_device_disconnect() {
+        let registry = SessionRegistry::default();
+        let handshake = registry.handshake_epoch();
+        let epoch = registry.authorization_epoch("device-1", handshake).unwrap();
+        registry.end_device("device-1", EndReason::User);
+
+        let mut wrote_trust = false;
+        assert!(registry
+            .with_current_authorization("device-1", epoch, || wrote_trust = true)
+            .is_none());
+        assert!(!wrote_trust);
+    }
+
+    #[test]
+    fn disconnecting_one_device_does_not_cancel_another_devices_handshake() {
+        let registry = SessionRegistry::default();
+        let handshake = registry.handshake_epoch();
+        registry.end_device("device-a", EndReason::User);
+        let epoch = registry
+            .authorization_epoch("device-b", handshake)
+            .expect("device A disconnect must not invalidate device B");
+        let (commands, _command_rx) = mpsc::channel(1);
+        let (end, _end_rx) = watch::channel(None);
+
+        assert!(registry
+            .register(session_info("session-b", "device-b"), commands, end, epoch)
+            .is_some());
+    }
+
+    #[test]
+    fn ending_one_session_does_not_cancel_another_devices_handshake() {
+        let registry = SessionRegistry::default();
+        let (commands_a, _commands_a_rx) = mpsc::channel(1);
+        let (end_a, _end_a_rx) = watch::channel(None);
+        let epoch_a = registry
+            .authorization_epoch("device-a", registry.handshake_epoch())
+            .unwrap();
+        registry
+            .register(
+                session_info("session-a", "device-a"),
+                commands_a,
+                end_a,
+                epoch_a,
+            )
+            .unwrap();
+        let handshake_b = registry.handshake_epoch();
+
+        assert!(registry.end_session("session-a", EndReason::User));
+        let epoch_b = registry
+            .authorization_epoch("device-b", handshake_b)
+            .expect("ending device A session must not invalidate device B");
+        let (commands_b, _commands_b_rx) = mpsc::channel(1);
+        let (end_b, _end_b_rx) = watch::channel(None);
+
+        assert!(registry
+            .register(
+                session_info("session-b", "device-b"),
+                commands_b,
+                end_b,
+                epoch_b
+            )
+            .is_some());
     }
 }

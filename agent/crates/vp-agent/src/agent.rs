@@ -566,6 +566,42 @@ impl Agent {
         }
     }
 
+    fn mutate_devices_and_end_device(
+        &self,
+        id: &str,
+        reason: EndReason,
+        f: impl FnOnce(&mut DeviceStore) -> Option<(String, String)>,
+        kind: &str,
+        message: impl Fn(&str) -> String,
+    ) -> bool {
+        let identity = self.core.identity.read().clone();
+        let sessions = &self.core.sessions;
+        let pairing = &self.core.pairing;
+        let device_store = &self.core.devices;
+        let (changed, _) = sessions.end_device_with(id, reason, || {
+            pairing.cancel_pending_device(id);
+            let mut devices = device_store.write();
+            let result = f(&mut devices);
+            if result.is_some() {
+                if let Err(error) = devices.save(&identity) {
+                    tracing::error!(%error, "failed to save devices");
+                }
+            }
+            result
+        });
+        match changed {
+            Some((device_id, name)) => {
+                self.core
+                    .audit
+                    .record(Severity::Notice, kind, message(&name))
+                    .device(&device_id, &name);
+                let _ = self.core.events.send(AgentEvent::DevicesChanged);
+                true
+            }
+            None => false,
+        }
+    }
+
     fn device_name(&self, id: &str) -> Option<String> {
         self.core.devices.read().get(id).map(|d| d.name.clone())
     }
@@ -623,26 +659,34 @@ impl Agent {
     /// Revocation ends live sessions and completely removes the authorization.
     pub fn revoke_device(&self, id: &str) -> bool {
         let name = self.device_name(id).unwrap_or_default();
-        self.core.sessions.end_device(id, EndReason::Revoked);
-        self.mutate_devices(
+        let revoked = self.mutate_devices_and_end_device(
+            id,
+            EndReason::Revoked,
             |d| d.revoke(id).then(|| (id.to_string(), name.clone())),
             "device.removed",
             |n| format!("{n} was removed. A new pairing approval is required to reconnect."),
-        )
+        );
+        revoked
     }
 
     pub fn forget_device(&self, id: &str) -> bool {
         let name = self.device_name(id).unwrap_or_default();
-        self.core.sessions.end_device(id, EndReason::Revoked);
-        self.mutate_devices(
+        let forgotten = self.mutate_devices_and_end_device(
+            id,
+            EndReason::Revoked,
             |d| d.forget(id).then(|| (id.to_string(), name.clone())),
             "device.forgotten",
             |n| format!("{n} was removed."),
-        )
+        );
+        forgotten
     }
 
     pub fn disconnect_device(&self, id: &str) -> usize {
-        let count = self.core.sessions.end_device(id, EndReason::User);
+        let sessions = &self.core.sessions;
+        let pairing = &self.core.pairing;
+        let (_, count) = sessions.end_device_with(id, EndReason::User, || {
+            pairing.cancel_pending_device(id);
+        });
         if count > 0 {
             let name = self.device_name(id).unwrap_or_default();
             self.core

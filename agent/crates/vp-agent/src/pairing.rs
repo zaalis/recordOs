@@ -75,6 +75,20 @@ impl PairingManager {
 
     pub fn close_window(&self) {
         *self.window.lock() = None;
+        // Closing the pairing UI also invalidates any approval already shown there. Otherwise a
+        // response arriving after service shutdown could authorize a handshake that was in flight.
+        *self.pending.lock() = None;
+    }
+
+    /// Cancels an approval for one device without changing the open pairing window.
+    pub fn cancel_pending_device(&self, device_id: &str) {
+        let mut pending = self.pending.lock();
+        if pending
+            .as_ref()
+            .is_some_and(|request| request.info.device_id == device_id)
+        {
+            *pending = None;
+        }
     }
 
     pub fn window(&self) -> Option<ConnectWindow> {
@@ -240,5 +254,42 @@ mod tests {
             Err(oneshot::error::TryRecvError::Closed)
         ));
         assert!(manager.begin(request("third", "ipad-2")).is_none());
+    }
+
+    #[test]
+    fn closing_window_cancels_an_already_visible_approval() {
+        let manager = PairingManager::default();
+        manager.open_window();
+        let mut decision = manager.begin(request("pending", "ipad-1")).unwrap();
+
+        manager.close_window();
+
+        assert!(manager.pending().is_none());
+        assert!(matches!(
+            decision.try_recv(),
+            Err(oneshot::error::TryRecvError::Closed)
+        ));
+    }
+
+    #[test]
+    fn disconnecting_one_device_cancels_only_its_pending_approval() {
+        let manager = PairingManager::default();
+        manager.open_window();
+        let mut decision = manager.begin(request("pending", "ipad-1")).unwrap();
+
+        manager.cancel_pending_device("ipad-2");
+        assert!(manager.pending().is_some());
+        assert!(matches!(
+            decision.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+
+        manager.cancel_pending_device("ipad-1");
+        assert!(manager.pending().is_none());
+        assert!(matches!(
+            decision.try_recv(),
+            Err(oneshot::error::TryRecvError::Closed)
+        ));
+        assert!(manager.window().is_some());
     }
 }

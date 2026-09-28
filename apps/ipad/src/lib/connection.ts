@@ -604,12 +604,13 @@ export class Connection {
         if (reason === 'expired' || reason === 'replaced' || reason === 'link') {
           this.scheduleReconnect(0, reason === 'link', true);
         } else {
-          this.closedByUser = true;
           if (reason === 'revoked' && this.target?.mode === 'auth' && this.target.agentId) {
             this.onAccessRemoved?.(this.target.agentId);
           }
-          this.teardown();
-          this.update({ phase: reason === 'user' ? 'ended' : 'failed', error: reason === 'revoked' ? describeError('revoked') : reason === 'user' ? null : 'La session s’est arrêtée sur le PC.' });
+          this.finishSession(
+            reason === 'user' ? 'ended' : 'failed',
+            reason === 'revoked' ? describeError('revoked') : reason === 'user' ? null : 'La session s’est arrêtée sur le PC.',
+          );
         }
         return;
       }
@@ -935,13 +936,11 @@ export class Connection {
     if ((code === 'revoked' || code === 'unknown_device') && this.target?.mode === 'auth' && this.target.agentId) {
       this.onAccessRemoved?.(this.target.agentId);
     }
-    this.teardown();
-    this.update({ phase: 'failed', error: describeError(code), sas: null, switching: false });
+    this.finishSession('failed', describeError(code));
   }
 
   private failMessage(message: string): void {
-    this.teardown();
-    this.update({ phase: 'failed', error: message, sas: null, switching: false });
+    this.finishSession('failed', message);
   }
 
   private closePeer(): void {
@@ -950,6 +949,8 @@ export class Connection {
     window.clearTimeout(this.iceWatchdog);
     window.clearTimeout(this.answerTimer);
     window.clearTimeout(this.peerTimer);
+    this.iceWatchdog = undefined;
+    this.answerTimer = undefined;
     this.peerTimer = undefined;
     for (const channel of [this.control, this.input, this.realtime]) {
       if (channel) {
@@ -985,11 +986,37 @@ export class Connection {
     window.clearTimeout(this.reconnectTimer);
     window.clearTimeout(this.cableRetryTimer);
     this.reconnectTimer = undefined;
+    this.cableRetryTimer = undefined;
     this.closePeer();
     const signaling = this.signaling;
     this.signaling = undefined;
     signaling?.close();
-    if (clearStream) this.update({ stream: null });
+    if (clearStream) {
+      // Closing the peer stops the transport, but explicitly stopping its remote tracks also
+      // releases Safari's decoder promptly when the page itself remains mounted under an overlay.
+      for (const track of this.snapshot.stream?.getTracks() ?? []) {
+        track.onended = null;
+        track.stop();
+      }
+      this.update({ stream: null });
+    }
+  }
+
+  /** End all transient session state while leaving persisted pairing and preferences untouched. */
+  private finishSession(phase: 'idle' | 'ended' | 'failed', error: string | null = null): void {
+    // Invalidate codec/path probes and any pending connection work before releasing transports.
+    this.connectEpoch += 1;
+    this.closedByUser = true;
+    this.suspendedForPagehide = false;
+    this.teardown();
+    this.target = undefined;
+    this.signalUrl = null;
+    this.cableFailedAt.clear();
+    this.cursorShapes.clear();
+    this.movingToCable = false;
+    this.lowDecodeSamples = 0;
+    this.performanceRecoveryApplied = false;
+    this.update({ ...this.initial(), phase, error });
   }
 
   /** Release live sockets when Safari caches or closes this page. */
@@ -1030,19 +1057,11 @@ export class Connection {
   }
 
   disconnect(): void {
-    this.connectEpoch += 1;
-    this.closedByUser = true;
-    this.suspendedForPagehide = false;
-    this.teardown();
-    this.update({ phase: 'ended', session: null, stats: EMPTY_STATS, connectedAt: null, link: null, switching: false });
+    this.finishSession('ended');
   }
 
   reset(): void {
-    this.connectEpoch += 1;
-    this.closedByUser = true;
-    this.suspendedForPagehide = false;
-    this.teardown();
-    this.update(this.initial());
+    this.finishSession('idle');
   }
 }
 
