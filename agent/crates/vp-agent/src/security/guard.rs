@@ -12,8 +12,12 @@ const MAX_TRACKED_IPS: usize = 4096;
 // This bucket covers every TCP connection, including page assets, API reads
 // and signaling. Two quick Safari page loads plus reconnects must fit without
 // being mistaken for a flood. Authentication failures have a separate lockout.
-const CONN_BURST: f64 = 32.0;
-const CONN_PER_SEC: f64 = 4.0;
+// A client that retries immediately on every rejection (no backoff) must not
+// be able to keep itself locked out forever by consuming tokens as fast as
+// they refill: the burst and the refill rate both have headroom above what a
+// reconnect loop plausibly sustains.
+const CONN_BURST: f64 = 60.0;
+const CONN_PER_SEC: f64 = 10.0;
 const MAX_LOCKOUT: Duration = Duration::from_secs(24 * 60 * 60);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -203,7 +207,7 @@ mod tests {
     fn connection_bucket_limits_bursts() {
         let guard = Guard::new(5, 15);
         let ip: IpAddr = "10.0.0.2".parse().unwrap();
-        let allowed = (0..40)
+        let allowed = (0..(CONN_BURST as u32 * 2))
             .filter(|_| guard.check_connection(ip) == Verdict::Allow)
             .count();
         assert_eq!(allowed, CONN_BURST as usize);
