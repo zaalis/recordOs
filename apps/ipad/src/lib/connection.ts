@@ -704,6 +704,8 @@ export class Connection {
     if (pc !== this.pc) return;
     const stats: LiveStats = { ...this.snapshot.stats };
     let codecId: string | undefined;
+    // Receiver counters the PC cannot see; sent to it for its log (see `client.stats`).
+    let receiver = { keyFrames: 0, pli: 0, nack: 0, packetsLost: 0, framesDropped: 0, freezes: 0 };
     const now = performance.now();
     let decodedProgress = false;
     let decodedCounterAvailable = false;
@@ -740,6 +742,14 @@ export class Connection {
         }
         this.lastFrames = { decoded, decodeTime, jbDelay, jbCount, at: now };
         codecId = entry.codecId as string | undefined;
+        receiver = {
+          keyFrames: Number(entry.keyFramesDecoded ?? 0),
+          pli: Number(entry.pliCount ?? 0),
+          nack: Number(entry.nackCount ?? 0),
+          packetsLost: Math.max(0, Number(entry.packetsLost ?? 0)),
+          framesDropped: Number(entry.framesDropped ?? 0),
+          freezes: Number(entry.freezeCount ?? 0),
+        };
       }
       if (entry.type === 'candidate-pair' && (entry.nominated || entry.selected) && entry.state === 'succeeded') {
         if (entry.availableIncomingBitrate) stats.networkKbps = Number(entry.availableIncomingBitrate) / 1000;
@@ -763,6 +773,15 @@ export class Connection {
       const frame = 1000 / Math.max(30, stats.fps ?? 60);
       stats.videoLatencyMs = agent.captureMs + agent.encodeMs + (agent.sendQueueMs ?? 0) + halfRtt + (stats.jitterBufferMs ?? 0) + (stats.decodeMs ?? 0) + frame / 2;
     }
+    this.sendControl({
+      t: 'client.stats',
+      decodedFps: Math.round((stats.decodedFps ?? 0) * 10) / 10,
+      ...receiver,
+      jitterBufferMs: Math.round((stats.jitterBufferMs ?? 0) * 10) / 10,
+      decodeMs: Math.round((stats.decodeMs ?? 0) * 100) / 100,
+      jitterMs: Math.round((stats.jitterMs ?? 0) * 10) / 10,
+      codec: stats.codec ?? '',
+    });
     this.maybeRecoverPerformance(stats);
     if (decodedCounterAvailable) this.maybeRecoverFrozenVideo(stats, decodedProgress);
     this.update({ stats });

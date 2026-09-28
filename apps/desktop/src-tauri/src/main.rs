@@ -136,13 +136,42 @@ async fn allow_usb_link(agent: tauri::State<'_, SharedAgent>, id: String) -> Res
         .map_err(|error| error.to_string())
 }
 
+/// Sends the agent's tracing output to `agent.<date>.log` in the `logs` folder of the Vision-Pro
+/// data directory (last seven days). The release app has no console, so without a file everything
+/// it logs — encoder in use, stream statistics, warnings — is lost. Falls back to standard output
+/// if the folder cannot be written. The returned guard flushes the file on exit and must stay
+/// alive.
+fn init_logging() -> Option<tracing_appender::non_blocking::WorkerGuard> {
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "info,str0m=warn".into());
+    let appender = vp_agent::paths::ensure_data_dir().ok().and_then(|dir| {
+        tracing_appender::rolling::Builder::new()
+            .rotation(tracing_appender::rolling::Rotation::DAILY)
+            .filename_prefix("agent")
+            .filename_suffix("log")
+            .max_log_files(7)
+            .build(dir.join("logs"))
+            .ok()
+    });
+    match appender {
+        Some(appender) => {
+            let (writer, guard) = tracing_appender::non_blocking(appender);
+            tracing_subscriber::fmt()
+                .with_env_filter(filter)
+                .with_writer(writer)
+                .with_ansi(false)
+                .init();
+            Some(guard)
+        }
+        None => {
+            tracing_subscriber::fmt().with_env_filter(filter).init();
+            None
+        }
+    }
+}
+
 fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,str0m=warn".into()),
-        )
-        .init();
+    let _log_guard = init_logging();
 
     let app = tauri::Builder::default()
         // The service owns a fixed LAN port. Letting a second desktop process

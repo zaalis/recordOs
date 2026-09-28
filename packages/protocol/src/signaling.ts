@@ -250,7 +250,22 @@ export type ControlToAgent =
   | { t: 'video.settings'; video: VideoSettings }
   | { t: 'display.select'; displayId: string }
   | { t: 'keyframe' }
-  | { t: 'app.watch'; enabled: boolean };
+  | { t: 'app.watch'; enabled: boolean }
+  /** What this iPad's video receiver measures (cumulative counters since the stream started). */
+  | {
+      t: 'client.stats';
+      decodedFps: number;
+      keyFrames: number;
+      pli: number;
+      nack: number;
+      packetsLost: number;
+      framesDropped: number;
+      freezes: number;
+      jitterBufferMs: number;
+      decodeMs: number;
+      jitterMs: number;
+      codec: string;
+    };
 
 export type AppProfileId = 'blender' | 'maya' | 'photoshop';
 

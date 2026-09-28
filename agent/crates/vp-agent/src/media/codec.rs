@@ -33,7 +33,9 @@ pub fn profile_spec(profile: LatencyProfile) -> ProfileSpec {
             bits_per_pixel: 0.1,
             min_kbps: 4_000,
             max_kbps: 40_000,
-            codec_preference: &[Hevc, H264, Av1],
+            // H.264 first: every iPad decodes it in hardware and Safari's WebRTC handles it best.
+            // HEVC saves bandwidth but Safari's RTP payload for it is not the standard one.
+            codec_preference: &[H264, Hevc, Av1],
         },
         LatencyProfile::LowLatency => ProfileSpec {
             max_auto_height: Some(1080),
@@ -309,7 +311,7 @@ mod tests {
             EncoderPreference::Auto,
         )
         .unwrap();
-        assert_eq!(choice.codec, CodecId::Hevc);
+        assert_eq!(choice.codec, CodecId::H264);
         assert!(choice.fallback_reason.unwrap().contains("iPad"));
         let choice = choose_codec(
             CodecSetting::Auto,

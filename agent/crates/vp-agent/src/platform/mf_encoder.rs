@@ -183,10 +183,11 @@ fn set_codec_value(api: &ICodecAPI, key: &GUID, value: VARIANT) -> bool {
     unsafe { api.SetValue(key, &value).is_ok() }
 }
 
-/// Frames between periodic keyframes: 30 seconds. Keyframes are several times larger than other
-/// frames and briefly stall the stream; the receiver asks for one whenever it needs it.
+/// Frames between periodic keyframes: 10 seconds. Keyframes are several times larger than other
+/// frames and briefly stall the stream, so they are rare; the receiver asks for one whenever it
+/// needs it, and the periodic one bounds how long a decoder that lost track can stay broken.
 fn keyframe_interval(fps: u32) -> u32 {
-    fps.saturating_mul(30)
+    fps.saturating_mul(10)
 }
 
 /// Encoder controls for interactive streaming.
@@ -751,9 +752,9 @@ mod tests {
     use super::{keyframe_interval, low_latency_buffer_size};
 
     #[test]
-    fn periodic_keyframes_are_thirty_seconds_apart() {
-        assert_eq!(keyframe_interval(60), 1_800);
-        assert_eq!(keyframe_interval(120), 3_600);
+    fn periodic_keyframes_are_ten_seconds_apart() {
+        assert_eq!(keyframe_interval(60), 600);
+        assert_eq!(keyframe_interval(120), 1_200);
     }
 
     #[test]

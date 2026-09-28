@@ -6,10 +6,9 @@
 //! exactly by watching the packets that really leave the PC: the RTP header of an SRTP packet is
 //! sent in clear, and its marker bit flags the last packet of each video frame.
 //!
-//! The capture thread reads the result and holds back encoding while earlier frames are still
-//! waiting to leave; it then encodes the newest desktop image as soon as the path is free (latest
-//! wins) instead of stacking stale frames behind each other. Holding back a frame *before* it is
-//! encoded never breaks the decoder's reference chain, unlike dropping an encoded frame.
+//! The capture thread reads the result: [`FrameGate`] uses it to hold encoding back — for a
+//! bounded time — only when the queue is clearly backed up, so stale frames never stack up. The
+//! network task also reports the queue delay in the statistics.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -209,6 +208,73 @@ impl RtpSummary {
     }
 }
 
+/// A frame that has waited this long in the send queue means the link cannot keep up.
+const CONGESTED_AGE: Duration = Duration::from_millis(100);
+/// Frames queued (written, last packet not yet sent, plus any waiting in the hand-off channel)
+/// beyond which encoding another one only adds delay.
+const CONGESTED_FRAMES: u32 = 4;
+/// Longest a due frame is held back; then one goes out regardless, so the picture and the
+/// bandwidth estimate keep moving even on a very slow link.
+const MAX_HOLD: Duration = Duration::from_millis(100);
+
+/// Decides whether a due frame is encoded now or the capture loop waits.
+///
+/// Normally it never holds anything: on a healthy link a frame leaves the PC within a few
+/// milliseconds, so there is nothing to wait for, and holding would only lower the frame rate.
+/// The bandwidth estimator sizes the stream from what is actually sent, so a rate that is held
+/// down without cause also pins the estimate — and the quality — low. It only steps in once the
+/// queue is clearly backed up (a frame waiting 100 ms or more), where encoding more would just
+/// stack stale video behind it. The wait is bounded, and every held frame is replaced by the
+/// newest desktop image (latest wins). Holding *before* encoding never breaks the decoder's
+/// reference chain.
+#[derive(Default)]
+pub struct FrameGate {
+    holding_since: Option<Instant>,
+    held: Duration,
+}
+
+impl FrameGate {
+    /// `queued_frames` counts frames written but not yet fully sent, `oldest` is how long the
+    /// first of them has waited and `channel_full` tells that the hand-off to the network task
+    /// has no free slot. Returns true when the frame may be encoded now.
+    pub fn allow(
+        &mut self,
+        now: Instant,
+        queued_frames: u32,
+        oldest: Option<Duration>,
+        channel_full: bool,
+    ) -> bool {
+        let congested = channel_full
+            || queued_frames >= CONGESTED_FRAMES
+            || oldest.is_some_and(|age| age >= CONGESTED_AGE);
+        if congested {
+            let since = *self.holding_since.get_or_insert(now);
+            // A full hand-off cannot take a frame at all: keep waiting, never drop it.
+            if channel_full || now.duration_since(since) < MAX_HOLD {
+                return false;
+            }
+        }
+        self.release(now);
+        true
+    }
+
+    /// The due frame went away for another reason (nothing to encode any more).
+    pub fn cancel(&mut self, now: Instant) {
+        self.release(now);
+    }
+
+    fn release(&mut self, now: Instant) {
+        if let Some(since) = self.holding_since.take() {
+            self.held += now.saturating_duration_since(since);
+        }
+    }
+
+    /// Time spent holding since the previous call (for statistics).
+    pub fn take_held(&mut self) -> Duration {
+        std::mem::take(&mut self.held)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -330,5 +396,73 @@ mod tests {
         tracker.on_frame_written(1000, t0);
         tracker.on_frame_written(2000, t0 + STALE + Duration::from_millis(1));
         assert_eq!(shared.queued_frames(), 1);
+    }
+
+    #[test]
+    fn the_gate_never_holds_a_healthy_link() {
+        let mut gate = FrameGate::default();
+        let t0 = Instant::now();
+        // A frame or two in flight, waiting a few milliseconds: normal operation.
+        for (queued, age_ms) in [
+            (0, None),
+            (1, Some(4)),
+            (2, Some(16)),
+            (3, Some(40)),
+            (3, Some(90)),
+        ] {
+            let oldest = age_ms.map(Duration::from_millis);
+            assert!(
+                gate.allow(t0, queued, oldest, false),
+                "queued {queued}, age {age_ms:?}"
+            );
+        }
+        assert_eq!(gate.take_held(), Duration::ZERO);
+    }
+
+    #[test]
+    fn the_gate_holds_a_backed_up_queue_for_a_bounded_time() {
+        let mut gate = FrameGate::default();
+        let t0 = Instant::now();
+        let backed_up = Some(Duration::from_millis(150));
+        assert!(!gate.allow(t0, 2, backed_up, false));
+        assert!(!gate.allow(t0 + Duration::from_millis(60), 2, backed_up, false));
+        // Held for MAX_HOLD: one frame goes out anyway, and the hold starts over.
+        assert!(gate.allow(t0 + Duration::from_millis(100), 2, backed_up, false));
+        assert!(!gate.allow(t0 + Duration::from_millis(101), 2, backed_up, false));
+        assert!(gate.take_held() >= Duration::from_millis(100));
+        // The queue drained: no hold.
+        assert!(gate.allow(t0 + Duration::from_millis(300), 0, None, false));
+    }
+
+    #[test]
+    fn the_gate_counts_many_queued_frames_as_congestion() {
+        let mut gate = FrameGate::default();
+        let t0 = Instant::now();
+        assert!(!gate.allow(t0, CONGESTED_FRAMES, Some(Duration::from_millis(5)), false));
+        assert!(gate.allow(
+            t0 + MAX_HOLD,
+            CONGESTED_FRAMES,
+            Some(Duration::from_millis(5)),
+            false
+        ));
+    }
+
+    #[test]
+    fn a_full_hand_off_is_waited_out_without_dropping_the_frame() {
+        let mut gate = FrameGate::default();
+        let t0 = Instant::now();
+        assert!(!gate.allow(t0, 0, None, true));
+        assert!(!gate.allow(t0 + Duration::from_secs(1), 0, None, true));
+        assert!(gate.allow(t0 + Duration::from_secs(1), 0, None, false));
+    }
+
+    #[test]
+    fn a_cancelled_frame_stops_the_hold_clock() {
+        let mut gate = FrameGate::default();
+        let t0 = Instant::now();
+        assert!(!gate.allow(t0, 4, None, false));
+        gate.cancel(t0 + Duration::from_millis(30));
+        assert_eq!(gate.take_held(), Duration::from_millis(30));
+        assert!(!gate.allow(t0 + Duration::from_millis(500), 4, None, false));
     }
 }

@@ -2,8 +2,8 @@
 //!
 //! Frames are encoded as soon as they are captured, at most once per frame interval of the
 //! target frame rate. When the desktop is idle a refresh frame is sent twice per second.
-//! While earlier frames are still waiting to leave the PC, encoding is held back and the newest
-//! desktop image is encoded once the path is free (latest wins), so video never queues up.
+//! When the link is clearly backed up (see [`FrameGate`]) encoding is held back for a bounded time
+//! and the newest desktop image is encoded once the path frees up (latest wins).
 //! Device loss (resolution change, secure desktop, GPU reset) rebuilds the pipeline automatically.
 
 use super::capture::{Acquire, CursorState, DesktopDuplicator};
@@ -13,7 +13,7 @@ use super::inject::SharedRect;
 use super::mf_encoder::{self, EncodedFrame, MfEncoder};
 use super::sw_encoder::SoftwareEncoder;
 use crate::config::{CodecId, VideoSettings};
-use crate::media::backlog::SendBacklog;
+use crate::media::backlog::{FrameGate, SendBacklog};
 use crate::media::codec;
 use crate::media::rtc::{EncodedVideo, PipelineCommand, PipelineEvent, PipelineStats};
 use crate::protocol::{AppliedVideo, ClientDisplay, DisplayInfo};
@@ -28,9 +28,6 @@ const IDLE_REFRESH: Duration = Duration::from_millis(500);
 const OUTPUT_POLL: Duration = Duration::from_millis(1);
 /// How often the send path is checked again while a frame is held back.
 const HOLD_POLL: Duration = Duration::from_millis(1);
-/// Congestion that lasts longer than this still lets one frame through, so the picture and the
-/// bandwidth estimate keep moving (at least four frames per second).
-const MAX_HOLD: Duration = Duration::from_millis(250);
 /// Lowest bitrate the bandwidth estimate may bring the encoder down to. A higher floor made the
 /// encoder outrun a weak link permanently, and the excess piled up in the send queue.
 const MIN_ADAPTIVE_KBPS: u32 = 1_000;
@@ -91,20 +88,6 @@ pub fn display_infos(outputs: &[Output]) -> Vec<DisplayInfo> {
             primary: o.primary,
         })
         .collect()
-}
-
-/// True while encoding another frame would only queue it behind earlier ones: the hand-off to
-/// the network task is full, two frames are already waiting, or the one waiting has not left
-/// within a frame interval.
-fn send_path_busy(
-    queued_frames: u32,
-    oldest_age: Option<Duration>,
-    channel_full: bool,
-    interval: Duration,
-) -> bool {
-    channel_full
-        || queued_frames >= 2
-        || (queued_frames >= 1 && oldest_age.is_some_and(|age| age >= interval))
 }
 
 /// Capture times handed to the encoder: when the desktop image was acquired, kept strictly
@@ -318,9 +301,8 @@ fn run(
         let mut window = (Instant::now(), 0u32, 0u32, 0f32, 0f32);
         // When the desktop image waiting to be encoded was acquired.
         let mut acquired_at = Instant::now();
-        // Since when a due frame has been held back because the send path is busy.
-        let mut holding_since: Option<Instant> = None;
-        let mut held = Duration::ZERO;
+        let mut gate = FrameGate::default();
+        let mut holding = false;
 
         loop {
             while let Ok(command) = commands.try_recv() {
@@ -388,7 +370,7 @@ fn run(
             if awaiting {
                 timeout = timeout.min(OUTPUT_POLL);
             }
-            if holding_since.is_some() {
+            if holding {
                 // A frame is due but held back: look at the send path again shortly, or take a
                 // newer desktop image as soon as one is composed.
                 timeout = HOLD_POLL;
@@ -435,30 +417,27 @@ fn run(
                     || (force_keyframe && since >= interval)
                     || flush);
             if !due {
-                if let Some(started) = holding_since.take() {
-                    held += started.elapsed();
+                if holding {
+                    gate.cancel(Instant::now());
+                    holding = false;
                 }
                 continue;
             }
 
-            // Latest wins: while earlier frames are still waiting to leave the PC, encoding
-            // another one would only queue it behind them. Wait, then encode the newest image.
+            // Latest wins: on a backed-up link, wait for the queue instead of stacking another
+            // stale frame behind it, then encode the newest image.
             let now = Instant::now();
             let (in_channel, channel_full) = sink.pending();
-            if send_path_busy(
+            if !gate.allow(
+                now,
                 backlog.queued_frames().saturating_add(in_channel),
                 backlog.oldest_age(now),
                 channel_full,
-                interval,
             ) {
-                let started = *holding_since.get_or_insert(now);
-                if channel_full || now.duration_since(started) < MAX_HOLD {
-                    continue;
-                }
+                holding = true;
+                continue;
             }
-            if let Some(started) = holding_since.take() {
-                held += now.duration_since(started);
-            }
+            holding = false;
 
             let encode_start = Instant::now();
             // A new desktop image carries the time it was captured; a refresh of an unchanged
@@ -519,8 +498,7 @@ fn run(
             if window.0.elapsed() >= Duration::from_secs(1) {
                 let secs = window.0.elapsed().as_secs_f32();
                 let mut s = stats.lock();
-                s.stats.held_ms = held.as_secs_f32() * 1000.0 / secs;
-                held = Duration::ZERO;
+                s.stats.held_ms = gate.take_held().as_secs_f32() * 1000.0 / secs;
                 s.stats.capture_fps = window.1 as f32 / secs;
                 s.stats.encode_fps = window.2 as f32 / secs;
                 s.stats.capture_ms = if window.2 > 0 {
@@ -548,32 +526,6 @@ fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    const FRAME: Duration = Duration::from_micros(16_667);
-
-    #[test]
-    fn an_idle_send_path_accepts_a_new_frame() {
-        assert!(!send_path_busy(0, None, false, FRAME));
-        // A frame that is leaving within its interval does not hold the next one.
-        assert!(!send_path_busy(
-            1,
-            Some(Duration::from_millis(5)),
-            false,
-            FRAME
-        ));
-    }
-
-    #[test]
-    fn a_backed_up_send_path_holds_the_next_frame() {
-        assert!(send_path_busy(1, Some(FRAME), false, FRAME));
-        assert!(send_path_busy(
-            2,
-            Some(Duration::from_millis(1)),
-            false,
-            FRAME
-        ));
-        assert!(send_path_busy(0, None, true, FRAME));
-    }
 
     #[test]
     fn capture_times_are_strictly_increasing() {

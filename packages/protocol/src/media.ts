@@ -53,7 +53,7 @@ export const LATENCY_PROFILES: Record<LatencyProfile, LatencyProfileSpec> = {
     bitsPerPixel: 0.1,
     minKbps: 4_000,
     maxKbps: 40_000,
-    codecPreference: ['hevc', 'h264', 'av1'],
+    codecPreference: ['h264', 'hevc', 'av1'],
   },
   'low-latency': {
     id: 'low-latency',
@@ -179,6 +179,6 @@ export interface AgentStats {
   sendQueueMaxMs?: number;
   /** Milliseconds per second the PC held encoding back because the network was congested. */
   heldMs?: number;
-  /** The PC asked this iPad to show frames as soon as they are decoded (no jitter buffer). */
-  zeroPlayoutDelay?: boolean;
+  /** Upper bound the PC asked of this iPad's jitter buffer, in ms (0: not accepted). */
+  playoutDelayCapMs?: number;
 }

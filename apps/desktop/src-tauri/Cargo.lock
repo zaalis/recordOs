@@ -5655,6 +5655,7 @@ dependencies = [
  "tauri-plugin-autostart",
  "tauri-plugin-global-shortcut",
  "tauri-plugin-single-instance",
+ "tracing-appender",
  "tracing-subscriber",
  "vp-agent",
 ]

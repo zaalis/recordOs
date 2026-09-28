@@ -40,6 +40,13 @@ const MAX_INPUT_PER_SEC: u32 = 3000;
 /// leaves 12 free). str0m renumbers it to whatever id the iPad's offer uses.
 const PLAYOUT_DELAY_EXT_ID: u8 = 12;
 
+/// Upper bound, in milliseconds, asked of the iPad's jitter buffer through the playout-delay
+/// extension. It caps Safari's adaptive buffer (50–200 ms and growing with jitter) without
+/// removing it. A maximum of 0 must not be used: it leaves no room for a late packet or a
+/// retransmission, so a receiver drops every frame that misses its deadline before decoding it,
+/// starves its decoder and asks for keyframes in a loop — a few frames per second on Wi-Fi.
+pub const PLAYOUT_MAX_DELAY_MS: u64 = 100;
+
 /// Room in the UDP send buffer for a whole frame burst. The Windows default (64 KB) can
 /// overflow when a large frame leaves at once, and a datagram refused there is silently lost.
 const UDP_SEND_BUFFER: usize = 1 << 20;
@@ -112,6 +119,38 @@ mod tests {
     }
 
     #[test]
+    fn the_ipad_receiver_report_is_understood() {
+        use crate::protocol::ControlToAgent;
+        // Exactly what apps/ipad/src/lib/connection.ts sends.
+        let json = r#"{"t":"client.stats","decodedFps":58.5,"keyFrames":3,"pli":0,"nack":12,
+            "packetsLost":4,"framesDropped":0,"freezes":1,"jitterBufferMs":21.3,"decodeMs":1.25,
+            "jitterMs":3.4,"codec":"H264"}"#;
+        match serde_json::from_str::<ControlToAgent>(json).expect("client.stats") {
+            ControlToAgent::ClientStats {
+                decoded_fps,
+                key_frames,
+                nack,
+                freezes,
+                codec,
+                ..
+            } => {
+                assert_eq!(decoded_fps, 58.5);
+                assert_eq!((key_frames, nack, freezes), (3, 12, 1));
+                assert_eq!(codec, "H264");
+            }
+            _ => panic!("wrong variant"),
+        }
+        // A misspelt field is rejected like every other control message.
+        assert!(serde_json::from_str::<ControlToAgent>(r#"{"t":"client.stats","fps":1}"#).is_err());
+    }
+
+    #[test]
+    fn playout_delay_is_never_zero() {
+        // A zero maximum makes receivers drop late frames instead of waiting for them.
+        const { assert!(super::PLAYOUT_MAX_DELAY_MS >= 40) };
+    }
+
+    #[test]
     fn playout_delay_is_detected_in_the_answer_only_when_negotiated() {
         let with = "v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\na=extmap:12 http://www.webrtc.org/experiments/rtp-hdrext/playout-delay\r\n";
         let without = "v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\na=extmap:3 http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01\r\n";
@@ -125,8 +164,8 @@ pub struct Negotiated {
     pub answer: String,
     pub sockets: Vec<UdpSocket>,
     pub relay: Option<RelayMediaLink>,
-    /// The iPad accepted the playout-delay extension: its jitter buffer can be switched off.
-    pub zero_playout_delay: bool,
+    /// The iPad accepted the playout-delay extension: its jitter buffer can be capped.
+    pub playout_delay_negotiated: bool,
 }
 
 /// Enlarges a UDP socket's send buffer (see [`UDP_SEND_BUFFER`]).
@@ -212,14 +251,14 @@ pub fn negotiate(
         .accept_offer(offer)
         .map_err(|e| anyhow::anyhow!("offer rejected: {e}"))?;
     let answer = answer.to_sdp_string();
-    let zero_playout_delay = answer_has_playout_delay(&answer);
-    tracing::info!(zero_playout_delay, "video answer ready");
+    let playout_delay_negotiated = answer_has_playout_delay(&answer);
+    tracing::info!(playout_delay_negotiated, "video answer ready");
     Ok(Negotiated {
         rtc,
         answer,
         sockets,
         relay,
-        zero_playout_delay,
+        playout_delay_negotiated,
     })
 }
 
@@ -288,7 +327,26 @@ struct State {
     pending_control: Vec<String>,
     /// Measures how long each frame waits before its last packet leaves.
     tracker: FrameTracker,
-    zero_playout_delay: bool,
+    playout_delay_negotiated: bool,
+    /// Latest report from the iPad's video receiver.
+    client: Option<ClientReport>,
+    log_tick: u32,
+}
+
+/// What the iPad's receiver reported last (see `ControlToAgent::ClientStats`).
+#[derive(Default)]
+struct ClientReport {
+    decoded_fps: f32,
+    key_frames: u32,
+    pli: u32,
+    nack: u32,
+    packets_lost: u32,
+    frames_dropped: u32,
+    freezes: u32,
+    jitter_buffer_ms: f32,
+    decode_ms: f32,
+    jitter_ms: f32,
+    codec: String,
 }
 
 pub async fn run(negotiated: Negotiated, ctx: RtcContext) {
@@ -296,7 +354,7 @@ pub async fn run(negotiated: Negotiated, ctx: RtcContext) {
         mut rtc,
         sockets,
         relay,
-        zero_playout_delay,
+        playout_delay_negotiated,
         ..
     } = negotiated;
     let mut udp: Vec<Arc<tokio::net::UdpSocket>> = vec![];
@@ -362,7 +420,9 @@ pub async fn run(negotiated: Negotiated, ctx: RtcContext) {
     let mut state = State {
         ctx,
         tracker,
-        zero_playout_delay,
+        playout_delay_negotiated,
+        client: None,
+        log_tick: 0,
         video_mid: None,
         pt: None,
         channels: HashMap::new(),
@@ -722,6 +782,33 @@ fn handle_control(state: &mut State, data: &[u8]) {
             state.app_watch = enabled && state.ctx.settings.input.detect_active_app;
             state.last_app = None;
         }
+        ControlToAgent::ClientStats {
+            decoded_fps,
+            key_frames,
+            pli,
+            nack,
+            packets_lost,
+            frames_dropped,
+            freezes,
+            jitter_buffer_ms,
+            decode_ms,
+            jitter_ms,
+            codec,
+        } => {
+            state.client = Some(ClientReport {
+                decoded_fps,
+                key_frames,
+                pli,
+                nack,
+                packets_lost,
+                frames_dropped,
+                freezes,
+                jitter_buffer_ms,
+                decode_ms,
+                jitter_ms,
+                codec: codec.chars().take(24).collect(),
+            });
+        }
     }
 }
 
@@ -748,11 +835,13 @@ fn write_video(rtc: &mut Rtc, state: &mut State, video: EncodedVideo) {
         return;
     };
     if let Some(writer) = rtc.writer(mid) {
-        // Minimum and maximum playout delay of zero: the iPad shows each frame as soon as it is
-        // decoded instead of holding it in an adaptive jitter buffer (50–200 ms in Safari, which
-        // ignores `jitterBufferTarget`). Ignored when the extension was not negotiated.
+        // Cap the receiver's jitter buffer (Safari ignores `jitterBufferTarget`), but never to
+        // zero (see PLAYOUT_MAX_DELAY_MS). Ignored when the extension was not negotiated.
         match writer
-            .playout_delay(MediaTime::ZERO, MediaTime::ZERO)
+            .playout_delay(
+                MediaTime::ZERO,
+                MediaTime::from_millis(PLAYOUT_MAX_DELAY_MS),
+            )
             .write(
                 pt,
                 video.captured_at,
@@ -833,7 +922,11 @@ fn periodic(state: &mut State) {
             shared.stats.input_events_per_sec = input_rate;
             shared.stats.send_queue_ms = queue.average_ms;
             shared.stats.send_queue_max_ms = queue.max_ms;
-            shared.stats.zero_playout_delay = state.zero_playout_delay;
+            shared.stats.playout_delay_cap_ms = if state.playout_delay_negotiated {
+                PLAYOUT_MAX_DELAY_MS as u32
+            } else {
+                0
+            };
             shared.stats.clone()
         };
         {
@@ -847,6 +940,38 @@ fn periodic(state: &mut State) {
                 .push(json!({ "t": "stats", "stats": stats, "rttMs": state.rtt_ms }).to_string());
         }
         (state.ctx.on_change)();
+        // One diagnostic line every five seconds: the PC's view of the stream next to the iPad's
+        // own (which the PC cannot otherwise see). Written to the agent log file.
+        state.log_tick += 1;
+        if state.log_tick.is_multiple_of(5) {
+            let client = state.client.as_ref();
+            tracing::info!(
+                capture_fps = stats.capture_fps,
+                encode_fps = stats.encode_fps,
+                sent_fps = stats.sent_fps,
+                sent_kbps = stats.sent_kbps,
+                target_kbps = stats.target_kbps,
+                bwe_kbps = stats.bwe_kbps,
+                queue_ms = stats.send_queue_ms,
+                queue_max_ms = stats.send_queue_max_ms,
+                held_ms = stats.held_ms,
+                rtt_ms = state.rtt_ms.unwrap_or(-1.0),
+                codec = %stats.codec,
+                size = %format!("{}x{}", stats.width, stats.height),
+                client_fps = client.map_or(-1.0, |c| c.decoded_fps),
+                client_keyframes = client.map_or(0, |c| c.key_frames),
+                client_pli = client.map_or(0, |c| c.pli),
+                client_nack = client.map_or(0, |c| c.nack),
+                client_lost = client.map_or(0, |c| c.packets_lost),
+                client_dropped = client.map_or(0, |c| c.frames_dropped),
+                client_freezes = client.map_or(0, |c| c.freezes),
+                client_jitter_buffer_ms = client.map_or(-1.0, |c| c.jitter_buffer_ms),
+                client_decode_ms = client.map_or(-1.0, |c| c.decode_ms),
+                client_jitter_ms = client.map_or(-1.0, |c| c.jitter_ms),
+                client_codec = client.map_or("", |c| c.codec.as_str()),
+                "session stats"
+            );
+        }
     }
     if state.app_watch && state.control.is_some() {
         let exe = crate::platform::system::foreground_executable();

@@ -214,8 +214,8 @@ pub struct AgentStats {
     /// Milliseconds per second during which encoding was held back because earlier frames had
     /// not left yet (network congestion).
     pub held_ms: f32,
-    /// The iPad shows frames as soon as they are decoded (jitter buffer disabled).
-    pub zero_playout_delay: bool,
+    /// Upper bound asked of the iPad's jitter buffer, in ms (0: the iPad did not accept it).
+    pub playout_delay_cap_ms: u32,
 }
 
 /// Control data channel messages from the iPad.
@@ -235,4 +235,20 @@ pub enum ControlToAgent {
     Keyframe {},
     #[serde(rename = "app.watch")]
     AppWatch { enabled: bool },
+    /// What the iPad's video receiver measures, once a second. Only logged: it is the one view of
+    /// the stream that the PC cannot have (frames dropped before decoding, keyframe requests…).
+    #[serde(rename = "client.stats", rename_all = "camelCase")]
+    ClientStats {
+        decoded_fps: f32,
+        key_frames: u32,
+        pli: u32,
+        nack: u32,
+        packets_lost: u32,
+        frames_dropped: u32,
+        freezes: u32,
+        jitter_buffer_ms: f32,
+        decode_ms: f32,
+        jitter_ms: f32,
+        codec: String,
+    },
 }
