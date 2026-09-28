@@ -207,6 +207,15 @@ pub struct AgentStats {
     pub height: u32,
     pub input_events_per_sec: f32,
     pub input_process_ms: f32,
+    /// Average time a frame waited in the PC's send queue before its last packet left.
+    pub send_queue_ms: f32,
+    /// Longest such wait during the last second.
+    pub send_queue_max_ms: f32,
+    /// Milliseconds per second during which encoding was held back because earlier frames had
+    /// not left yet (network congestion).
+    pub held_ms: f32,
+    /// The iPad shows frames as soon as they are decoded (jitter buffer disabled).
+    pub zero_playout_delay: bool,
 }
 
 /// Control data channel messages from the iPad.

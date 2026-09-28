@@ -24,6 +24,7 @@ import {
   signRotation,
   generateDeviceIdentity,
 } from '@vision-pro/protocol';
+import { FrameLatencyMeter } from './frame-latency.ts';
 import { deviceKind, detectCodecs, measureRefreshRate, physicalViewport, signalingUrl } from './platform.ts';
 
 export type ConnectionPhase =
@@ -40,6 +41,8 @@ export interface LiveStats {
   pingMs: number | null;
   inputLatencyMs: number | null;
   videoLatencyMs: number | null;
+  /** `videoLatencyMs` was measured on displayed frames (true) or estimated per stage (false). */
+  videoLatencyMeasured: boolean;
   fps: number | null;
   decodedFps: number | null;
   bitrateKbps: number | null;
@@ -108,6 +111,7 @@ const EMPTY_STATS: LiveStats = {
   pingMs: null,
   inputLatencyMs: null,
   videoLatencyMs: null,
+  videoLatencyMeasured: false,
   fps: null,
   decodedFps: null,
   bitrateKbps: null,
@@ -167,6 +171,7 @@ export class Connection {
   private timers: number[] = [];
   private pingId = 0;
   private pings = new Map<number, number>();
+  private latency = new FrameLatencyMeter();
   private lastBytes: { bytes: number; at: number } | null = null;
   private lastFrames: { decoded: number; decodeTime: number; jbDelay: number; jbCount: number; at: number } | null = null;
   private lowDecodeSamples = 0;
@@ -237,6 +242,11 @@ export class Connection {
 
   getCursorShape(id: number): CursorShapeInfo | undefined {
     return this.cursorShapes.get(id);
+  }
+
+  /** Measures the real capture-to-display latency on the frames this element presents. */
+  observeVideo(video: HTMLVideoElement | null): void {
+    this.latency.observe(video);
   }
 
   async connect(target: ConnectTarget, identity: DeviceIdentity, deviceName: string, video: VideoSettings): Promise<void> {
@@ -619,7 +629,9 @@ export class Connection {
         const sent = this.pings.get(message.id);
         if (sent !== undefined) {
           this.pings.delete(message.id);
-          const rtt = performance.now() - sent;
+          const received = performance.now();
+          const rtt = received - sent;
+          if (typeof message.rtp === 'number') this.latency.onPong(sent, received, message.rtp);
           this.update({ stats: { ...this.snapshot.stats, pingMs: rtt, inputLatencyMs: rtt / 2 + 0.5 } });
         }
         return;
@@ -741,9 +753,15 @@ export class Connection {
     }
     const agent = stats.agent;
     const halfRtt = (stats.pingMs ?? 0) / 2;
-    if (agent) {
+    const measured = this.latency.take();
+    if (measured !== null) {
+      stats.videoLatencyMs = measured;
+      stats.videoLatencyMeasured = true;
+    } else if (agent && !stats.videoLatencyMeasured) {
+      // No frame could be measured (browser without frame timestamps): add up the stages. A
+      // measured value is kept while a static desktop shows no new frame.
       const frame = 1000 / Math.max(30, stats.fps ?? 60);
-      stats.videoLatencyMs = agent.captureMs + agent.encodeMs + halfRtt + (stats.jitterBufferMs ?? 0) + (stats.decodeMs ?? 0) + frame / 2;
+      stats.videoLatencyMs = agent.captureMs + agent.encodeMs + (agent.sendQueueMs ?? 0) + halfRtt + (stats.jitterBufferMs ?? 0) + (stats.decodeMs ?? 0) + frame / 2;
     }
     this.maybeRecoverPerformance(stats);
     if (decodedCounterAvailable) this.maybeRecoverFrozenVideo(stats, decodedProgress);
@@ -937,6 +955,11 @@ export class Connection {
     this.lastFrames = null;
     this.lastFrameProgressAt = 0;
     this.keyframeRecoveryRequested = false;
+    // The next stream's RTP clock starts from a new origin on the PC.
+    this.latency.reset();
+    if (this.snapshot.stats.videoLatencyMeasured) {
+      this.update({ stats: { ...this.snapshot.stats, videoLatencyMs: null, videoLatencyMeasured: false } });
+    }
   }
 
   private teardown(clearStream = true): void {

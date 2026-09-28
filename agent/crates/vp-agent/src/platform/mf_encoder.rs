@@ -183,23 +183,73 @@ fn set_codec_value(api: &ICodecAPI, key: &GUID, value: VARIANT) -> bool {
     unsafe { api.SetValue(key, &value).is_ok() }
 }
 
-/// Media Foundation expresses this setting in bits.  A quarter-second VBV is
-/// long enough for CBR hardware encoders to remain stable, while preventing a
-/// whole second of already obsolete desktop video from sitting in the encoder.
-fn low_latency_buffer_size(kbps: u32) -> u32 {
-    kbps.saturating_mul(250).max(250_000)
+/// Frames between periodic keyframes: 30 seconds. Keyframes are several times larger than other
+/// frames and briefly stall the stream; the receiver asks for one whenever it needs it.
+fn keyframe_interval(fps: u32) -> u32 {
+    fps.saturating_mul(30)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::low_latency_buffer_size;
+/// Encoder controls for interactive streaming.
+///
+/// Applied before the media types are set: hardware encoders commonly accept sequence-level
+/// controls only then, and afterwards report success while keeping their defaults. NVIDIA's
+/// encoder kept its 60-frame GOP that way — a large keyframe every second, each freezing the
+/// stream for about 100 ms. Applied again after the types for encoders that reset them.
+fn configure_for_low_latency(api: &ICodecAPI, bitrate_kbps: u32, fps: u32, quality: u32) {
+    set_codec_value(api, &CODECAPI_AVLowLatencyMode, VARIANT::from(true));
+    // Prefer the driver's real-time scheduling path.  Not every
+    // MFT exposes this control, so a rejected value is harmless.
+    set_codec_value(api, &CODECAPI_AVEncCommonRealTime, VARIANT::from(true));
+    set_codec_value(
+        api,
+        &CODECAPI_AVEncCommonRateControlMode,
+        VARIANT::from(eAVEncCommonRateControlMode_CBR.0 as u32),
+    );
+    set_codec_value(
+        api,
+        &CODECAPI_AVEncCommonMeanBitRate,
+        VARIANT::from(bitrate_kbps.saturating_mul(1000)),
+    );
+    // Bound every frame's size so it leaves without waiting
+    // in the pacer queue (see `low_latency_buffer_size`).
+    set_codec_value(
+        api,
+        &CODECAPI_AVEncCommonBufferSize,
+        VARIANT::from(low_latency_buffer_size(bitrate_kbps, fps)),
+    );
+    set_codec_value(
+        api,
+        &CODECAPI_AVEncMPVDefaultBPictureCount,
+        VARIANT::from(0u32),
+    );
+    set_codec_value(
+        api,
+        &CODECAPI_AVEncMPVGOPSize,
+        VARIANT::from(keyframe_interval(fps)),
+    );
+    set_codec_value(
+        api,
+        &CODECAPI_AVEncCommonQualityVsSpeed,
+        VARIANT::from(quality.min(100)),
+    );
+}
 
-    #[test]
-    fn vbv_window_is_short_and_has_a_safe_floor() {
-        assert_eq!(low_latency_buffer_size(2_000), 500_000);
-        assert_eq!(low_latency_buffer_size(200_000), 50_000_000);
-        assert_eq!(low_latency_buffer_size(100), 250_000);
-    }
+/// Smallest VBV the encoder is given, in bits (keeps very low bitrates encodable).
+const MIN_VBV_BITS: u32 = 50_000;
+
+/// Encoder VBV window, in bits (the unit Media Foundation uses). No single frame can be larger
+/// than about this.
+///
+/// The WebRTC pacer sends at once as long as its debt stays under 40 ms of its pacing rate
+/// (1.1 × the bandwidth estimate, while the encoder targets 0.85 × the estimate). A window of
+/// at most two frame intervals, capped at 40 ms, keeps every frame — keyframes included —
+/// inside that burst allowance, so it leaves immediately instead of waiting in the pacer queue.
+/// The former quarter-second window let one large frame occupy the queue for ~230 ms and delay
+/// every frame behind it.
+fn low_latency_buffer_size(kbps: u32, fps: u32) -> u32 {
+    let frame_ms = 1000.0 / fps.max(1) as f64;
+    let window_ms = (2.0 * frame_ms).min(40.0).max(frame_ms);
+    ((kbps as f64 * window_ms) as u32).max(MIN_VBV_BITS)
 }
 
 impl MfEncoder {
@@ -226,7 +276,7 @@ impl MfEncoder {
         );
         let mut last_error = None;
         for activate in candidates {
-            match unsafe {
+            let create = |configure_early| unsafe {
                 Self::create(
                     gpu,
                     activate,
@@ -236,11 +286,25 @@ impl MfEncoder {
                     fps,
                     bitrate_kbps,
                     low_latency_quality,
+                    configure_early,
                 )
-            } {
+            };
+            // Configure before the media types first (see `configure_for_low_latency`). An
+            // encoder that refuses that order is configured the former way instead of lost.
+            let result = create(true).or_else(|error| {
+                tracing::debug!(%error, "encoder refused early configuration; retrying");
+                unsafe {
+                    let _ = activate.ShutdownObject();
+                }
+                create(false)
+            });
+            match result {
                 Ok(encoder) => return Ok(encoder),
                 Err(error) => {
                     tracing::warn!(%error, name = %friendly_name(activate), "hardware encoder rejected configuration");
+                    unsafe {
+                        let _ = activate.ShutdownObject();
+                    }
                     last_error = Some(error);
                 }
             }
@@ -258,6 +322,7 @@ impl MfEncoder {
         fps: u32,
         bitrate_kbps: u32,
         quality: u32,
+        configure_early: bool,
     ) -> anyhow::Result<MfEncoder> {
         unsafe {
             let name = friendly_name(activate);
@@ -288,6 +353,13 @@ impl MfEncoder {
 
             let frame_size = ((width as u64) << 32) | height as u64;
             let frame_rate = ((fps as u64) << 32) | 1;
+
+            let codec_api: Option<ICodecAPI> = transform.cast().ok();
+            if configure_early {
+                if let Some(api) = &codec_api {
+                    configure_for_low_latency(api, bitrate_kbps, fps, quality);
+                }
+            }
 
             let output_type = MFCreateMediaType()?;
             output_type.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
@@ -334,43 +406,19 @@ impl MfEncoder {
             }
             anyhow::ensure!(input_set, "encoder does not accept NV12 input");
 
-            let codec_api: Option<ICodecAPI> = transform.cast().ok();
             if let Some(api) = &codec_api {
-                set_codec_value(api, &CODECAPI_AVLowLatencyMode, VARIANT::from(true));
-                // Prefer the driver's real-time scheduling path.  Not every
-                // MFT exposes this control, so a rejected value is harmless.
-                set_codec_value(api, &CODECAPI_AVEncCommonRealTime, VARIANT::from(true));
-                set_codec_value(
-                    api,
-                    &CODECAPI_AVEncCommonRateControlMode,
-                    VARIANT::from(eAVEncCommonRateControlMode_CBR.0 as u32),
-                );
-                set_codec_value(
-                    api,
-                    &CODECAPI_AVEncCommonMeanBitRate,
-                    VARIANT::from(bitrate_kbps.saturating_mul(1000)),
-                );
-                // Bound the encoder's own queue.  A one-second VBV is
-                // perceptibly stale for direct interaction on an iPad.
-                set_codec_value(
-                    api,
-                    &CODECAPI_AVEncCommonBufferSize,
-                    VARIANT::from(low_latency_buffer_size(bitrate_kbps)),
-                );
-                set_codec_value(
-                    api,
-                    &CODECAPI_AVEncMPVDefaultBPictureCount,
-                    VARIANT::from(0u32),
-                );
-                set_codec_value(
-                    api,
-                    &CODECAPI_AVEncMPVGOPSize,
-                    VARIANT::from(fps.saturating_mul(30)),
-                );
-                set_codec_value(
-                    api,
-                    &CODECAPI_AVEncCommonQualityVsSpeed,
-                    VARIANT::from(quality.min(100)),
+                // Again after the media types, for encoders that reset their
+                // controls when a type is set.
+                configure_for_low_latency(api, bitrate_kbps, fps, quality);
+                let effective_gop = api
+                    .GetValue(&CODECAPI_AVEncMPVGOPSize)
+                    .ok()
+                    .and_then(|value| u32::try_from(&value).ok());
+                tracing::info!(
+                    name = %name,
+                    requested = keyframe_interval(fps),
+                    effective = ?effective_gop,
+                    "encoder keyframe interval (frames)"
                 );
             }
 
@@ -433,13 +481,13 @@ impl MfEncoder {
                 &CODECAPI_AVEncCommonMeanBitRate,
                 VARIANT::from(kbps.saturating_mul(1000)),
             );
-            // Keep the encoder VBV window short and aligned with the adaptive
-            // bitrate. Leaving either the former 200 Mb/s buffer or a full
-            // second of video in place would make interaction feel delayed.
+            // Keep the VBV window aligned with the adaptive bitrate: a
+            // window sized for a higher rate would let frames outgrow the
+            // pacer's burst allowance again.
             set_codec_value(
                 api,
                 &CODECAPI_AVEncCommonBufferSize,
-                VARIANT::from(low_latency_buffer_size(kbps)),
+                VARIANT::from(low_latency_buffer_size(kbps, self.fps)),
             );
         }
     }
@@ -696,4 +744,29 @@ fn contains_parameter_sets(data: &[u8], codec: CodecId) -> bool {
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{keyframe_interval, low_latency_buffer_size};
+
+    #[test]
+    fn periodic_keyframes_are_thirty_seconds_apart() {
+        assert_eq!(keyframe_interval(60), 1_800);
+        assert_eq!(keyframe_interval(120), 3_600);
+    }
+
+    #[test]
+    fn vbv_window_fits_the_pacer_burst_allowance() {
+        // 60 FPS: two frames (33.3 ms).
+        assert_eq!(low_latency_buffer_size(12_000, 60), 400_000);
+        // 30 FPS: capped at 40 ms rather than two 33 ms frames.
+        assert_eq!(low_latency_buffer_size(10_000, 30), 400_000);
+        // 120 FPS: two frames (16.7 ms).
+        assert_eq!(low_latency_buffer_size(30_000, 120), 500_000);
+        // 24 FPS: never smaller than one frame interval.
+        assert_eq!(low_latency_buffer_size(10_000, 24), 416_666);
+        // Very low bitrates keep a usable floor.
+        assert_eq!(low_latency_buffer_size(500, 60), 50_000);
+    }
 }

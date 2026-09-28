@@ -255,7 +255,8 @@ export type ControlToAgent =
 export type AppProfileId = 'blender' | 'maya' | 'photoshop';
 
 export type ControlToClient =
-  | { t: 'pong'; id: number; t0: number; agentMs: number }
+  /** `rtp`: the PC's RTP video clock (90 kHz, 32-bit) when it answered; absent on older PCs. */
+  | { t: 'pong'; id: number; t0: number; agentMs: number; rtp?: number }
   | { t: 'stats'; stats: import('./media.ts').AgentStats }
   | { t: 'cursor.shape'; id: number; width: number; height: number; hotX: number; hotY: number; png: string }
   | { t: 'app.active'; exe: string; profile: AppProfileId | null }

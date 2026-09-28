@@ -169,7 +169,9 @@ export function Session() {
 
   useEffect(() => {
     const video = videoRef.current;
+    connection.observeVideo(video);
     return () => {
+      connection.observeVideo(null);
       if (video) video.srcObject = null;
     };
   }, []);
@@ -491,7 +493,7 @@ function SessionSettings({ prefs, state, onStageMode }: { prefs: Preferences; st
 
 function Stats({ state }: { state: ReturnType<typeof connection.getSnapshot> }) {
   const stats = state.stats;
-  return <aside className="stats-overlay" aria-label="Connection statistics"><div className="stats-title"><span className="vp-dot" data-tone="green" /> Live</div><dl><dt>Ping</dt><dd>{formatMs(stats.pingMs)}</dd><dt>Input</dt><dd>{formatMs(stats.inputLatencyMs)}</dd><dt>Video</dt><dd>{formatMs(stats.videoLatencyMs)}</dd><dt>Decoded</dt><dd>{stats.decodedFps?.toFixed(0) ?? '—'} FPS</dd><dt>Captured</dt><dd>{stats.agent?.captureFps?.toFixed(0) ?? '—'} FPS</dd><dt>Sent</dt><dd>{stats.agent?.sentFps?.toFixed(0) ?? '—'} FPS</dd><dt>Bitrate</dt><dd>{formatBitrate(stats.bitrateKbps ?? undefined)}</dd><dt>Loss</dt><dd>{stats.packetLossPct == null ? '—' : `${stats.packetLossPct.toFixed(2)}%`}</dd><dt>Jitter</dt><dd>{formatMs(stats.jitterMs)}</dd><dt>Codec</dt><dd>{stats.codec?.toUpperCase() ?? '—'}</dd><dt>Path</dt><dd>{state.link === 'usb' ? 'USB' : state.link === 'relay' ? 'Relais' : 'Wi-Fi'}</dd></dl></aside>;
+  return <aside className="stats-overlay" aria-label="Connection statistics"><div className="stats-title"><span className="vp-dot" data-tone="green" /> Live</div><dl><dt>Ping</dt><dd>{formatMs(stats.pingMs)}</dd><dt>Input</dt><dd>{formatMs(stats.inputLatencyMs)}</dd><dt>Video</dt><dd title={stats.videoLatencyMeasured ? 'Measured from capture to display' : 'Estimated from each stage'}>{stats.videoLatencyMs != null && !stats.videoLatencyMeasured ? '≈ ' : ''}{formatMs(stats.videoLatencyMs)}</dd><dt>PC queue</dt><dd>{formatMs(stats.agent?.sendQueueMs)}</dd><dt>Buffer</dt><dd>{formatMs(stats.jitterBufferMs)}</dd><dt>Decoded</dt><dd>{stats.decodedFps?.toFixed(0) ?? '—'} FPS</dd><dt>Captured</dt><dd>{stats.agent?.captureFps?.toFixed(0) ?? '—'} FPS</dd><dt>Sent</dt><dd>{stats.agent?.sentFps?.toFixed(0) ?? '—'} FPS</dd><dt>Bitrate</dt><dd>{formatBitrate(stats.bitrateKbps ?? undefined)}</dd><dt>Loss</dt><dd>{stats.packetLossPct == null ? '—' : `${stats.packetLossPct.toFixed(2)}%`}</dd><dt>Jitter</dt><dd>{formatMs(stats.jitterMs)}</dd><dt>Codec</dt><dd>{stats.codec?.toUpperCase() ?? '—'}</dd><dt>Path</dt><dd>{state.link === 'usb' ? 'USB' : state.link === 'relay' ? 'Relais' : 'Wi-Fi'}</dd></dl></aside>;
 }
 
 function Metric({ label, value }: { label: string; value: string }) { return <div className="metric"><b>{value}</b><span>{label}</span></div>; }

@@ -7,6 +7,7 @@
 
 use crate::config::{CodecId, Settings};
 use crate::input::{self, InputCategory, InputEvent, SequenceFilter};
+use crate::media::backlog::{FrameTracker, SendBacklog};
 use crate::platform::capture::{encode_png, CursorShape, CursorState};
 use crate::platform::inject::{InjectCommand, InputPolicy};
 use crate::protocol::{AgentStats, AppliedVideo, ControlToAgent, DisplayInfo};
@@ -26,6 +27,7 @@ use str0m::channel::ChannelId;
 use str0m::format::Codec;
 use str0m::media::{MediaKind, MediaTime, Mid, Pt};
 use str0m::net::{Protocol, Receive};
+use str0m::rtp::Extension;
 use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc};
 
 pub const CONTROL_LABEL: &str = "vp-control";
@@ -33,6 +35,14 @@ pub const INPUT_LABEL: &str = "vp-input";
 pub const INPUT_RT_LABEL: &str = "vp-input-rt";
 
 const MAX_INPUT_PER_SEC: u32 = 3000;
+
+/// Session-level id offered for the playout-delay RTP header extension (the standard str0m map
+/// leaves 12 free). str0m renumbers it to whatever id the iPad's offer uses.
+const PLAYOUT_DELAY_EXT_ID: u8 = 12;
+
+/// Room in the UDP send buffer for a whole frame burst. The Windows default (64 KB) can
+/// overflow when a large frame leaves at once, and a datagram refused there is silently lost.
+const UDP_SEND_BUFFER: usize = 1 << 20;
 
 pub struct EncodedVideo {
     pub data: Vec<u8>,
@@ -81,13 +91,32 @@ pub fn initial_bwe_kbps(desired_kbps: u32) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::initial_bwe_kbps;
+    use super::{answer_has_playout_delay, initial_bwe_kbps, rtp_clock};
+    use std::time::{Duration, Instant};
 
     #[test]
     fn maximum_quality_starts_with_a_safe_receiver_estimate() {
         assert_eq!(initial_bwe_kbps(200_000), 12_000);
         assert_eq!(initial_bwe_kbps(1_500), 4_000);
         assert_eq!(initial_bwe_kbps(8_000), 8_000);
+    }
+
+    #[test]
+    fn rtp_clock_matches_the_capture_pipeline_timestamps() {
+        let epoch = Instant::now();
+        assert_eq!(rtp_clock(epoch, epoch), 0);
+        assert_eq!(rtp_clock(epoch, epoch + Duration::from_secs(1)), 90_000);
+        // Same formula as the pipeline: microseconds × 9 / 100, truncated to 32 bits.
+        let later = epoch + Duration::from_micros(123_456_789);
+        assert_eq!(rtp_clock(epoch, later), (123_456_789u64 * 9 / 100) as u32);
+    }
+
+    #[test]
+    fn playout_delay_is_detected_in_the_answer_only_when_negotiated() {
+        let with = "v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\na=extmap:12 http://www.webrtc.org/experiments/rtp-hdrext/playout-delay\r\n";
+        let without = "v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\na=extmap:3 http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01\r\n";
+        assert!(answer_has_playout_delay(with));
+        assert!(!answer_has_playout_delay(without));
     }
 }
 
@@ -96,7 +125,31 @@ pub struct Negotiated {
     pub answer: String,
     pub sockets: Vec<UdpSocket>,
     pub relay: Option<RelayMediaLink>,
+    /// The iPad accepted the playout-delay extension: its jitter buffer can be switched off.
+    pub zero_playout_delay: bool,
 }
+
+/// Enlarges a UDP socket's send buffer (see [`UDP_SEND_BUFFER`]).
+#[cfg(windows)]
+fn enlarge_send_buffer(socket: &UdpSocket) {
+    use std::os::windows::io::AsRawSocket;
+    use windows::Win32::Networking::WinSock::{setsockopt, SOCKET, SOL_SOCKET, SO_SNDBUF};
+    let size = (UDP_SEND_BUFFER as i32).to_ne_bytes();
+    let result = unsafe {
+        setsockopt(
+            SOCKET(socket.as_raw_socket() as usize),
+            SOL_SOCKET,
+            SO_SNDBUF,
+            Some(&size),
+        )
+    };
+    if result != 0 {
+        tracing::debug!("could not enlarge the UDP send buffer");
+    }
+}
+
+#[cfg(not(windows))]
+fn enlarge_send_buffer(_socket: &UdpSocket) {}
 
 static CRYPTO: Once = Once::new();
 
@@ -116,6 +169,8 @@ pub fn negotiate(
         .enable_h265(codec == CodecId::Hevc)
         .enable_av1(codec == CodecId::Av1)
         .enable_bwe(Some(Bitrate::kbps(initial_bwe as u64)))
+        // Lets every frame tell the iPad to show it as soon as it is decoded (see write_video).
+        .set_extension(PLAYOUT_DELAY_EXT_ID, Extension::PlayoutDelay)
         .set_stats_interval(Some(Duration::from_secs(1)))
         .build(Instant::now());
     // Keep the requested setting as the long-term objective. str0m increases
@@ -127,6 +182,7 @@ pub fn negotiate(
     for ip in ips {
         let socket = UdpSocket::bind(SocketAddr::from((*ip, 0)))?;
         socket.set_nonblocking(true)?;
+        enlarge_send_buffer(&socket);
         let addr = socket.local_addr()?;
         match Candidate::host(addr, "udp") {
             Ok(candidate) => {
@@ -155,11 +211,23 @@ pub fn negotiate(
         .sdp_api()
         .accept_offer(offer)
         .map_err(|e| anyhow::anyhow!("offer rejected: {e}"))?;
+    let answer = answer.to_sdp_string();
+    let zero_playout_delay = answer_has_playout_delay(&answer);
+    tracing::info!(zero_playout_delay, "video answer ready");
     Ok(Negotiated {
         rtc,
-        answer: answer.to_sdp_string(),
+        answer,
         sockets,
         relay,
+        zero_playout_delay,
+    })
+}
+
+/// True if the answer kept the playout-delay extension (only possible when the offer had it).
+fn answer_has_playout_delay(answer_sdp: &str) -> bool {
+    answer_sdp.lines().any(|line| {
+        line.starts_with("a=extmap:")
+            && line.contains("http://www.webrtc.org/experiments/rtp-hdrext/playout-delay")
     })
 }
 
@@ -177,6 +245,16 @@ pub struct RtcContext {
     pub stop: tokio::sync::watch::Receiver<bool>,
     pub stats: Arc<Mutex<PipelineStats>>,
     pub settings: Settings,
+    /// Origin of the RTP timestamps written by the capture pipeline.
+    pub epoch: Instant,
+    /// Frames written but not yet sent, read by the capture pipeline.
+    pub backlog: Arc<SendBacklog>,
+}
+
+/// Current value of the RTP video clock (90 kHz since `epoch`, wrapped like the RTP header).
+/// The iPad uses it to relate a displayed frame's RTP timestamp to its own clock.
+fn rtp_clock(epoch: Instant, now: Instant) -> u32 {
+    (now.saturating_duration_since(epoch).as_micros() as u64 * 9 / 100) as u32
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -208,6 +286,9 @@ struct State {
     rtt_ms: Option<f32>,
     sent_bytes: (u64, Instant, u32),
     pending_control: Vec<String>,
+    /// Measures how long each frame waits before its last packet leaves.
+    tracker: FrameTracker,
+    zero_playout_delay: bool,
 }
 
 pub async fn run(negotiated: Negotiated, ctx: RtcContext) {
@@ -215,6 +296,7 @@ pub async fn run(negotiated: Negotiated, ctx: RtcContext) {
         mut rtc,
         sockets,
         relay,
+        zero_playout_delay,
         ..
     } = negotiated;
     let mut udp: Vec<Arc<tokio::net::UdpSocket>> = vec![];
@@ -276,8 +358,11 @@ pub async fn run(negotiated: Negotiated, ctx: RtcContext) {
     drop(net_tx);
 
     let app_watch = ctx.settings.input.detect_active_app;
+    let tracker = FrameTracker::new(ctx.backlog.clone());
     let mut state = State {
         ctx,
+        tracker,
+        zero_playout_delay,
         video_mid: None,
         pt: None,
         channels: HashMap::new(),
@@ -386,6 +471,11 @@ fn drain(
         match rtc.poll_output() {
             Ok(Output::Timeout(t)) => return Some(t),
             Ok(Output::Transmit(transmit)) => {
+                if let Some(pt) = state.pt {
+                    state
+                        .tracker
+                        .on_transmit(&transmit.contents, *pt, Instant::now());
+                }
                 if let Some(relay) = relay.filter(|r| r.local() == transmit.source) {
                     relay.send(transmit.destination, &transmit.contents);
                     state.sent_bytes.0 += transmit.contents.len() as u64;
@@ -585,9 +675,11 @@ fn handle_control(state: &mut State, data: &[u8]) {
     };
     match message {
         ControlToAgent::Ping { id, t0 } => {
-            state
-                .pending_control
-                .push(json!({ "t": "pong", "id": id, "t0": t0, "agentMs": now_ms() }).to_string());
+            let rtp = rtp_clock(state.ctx.epoch, Instant::now());
+            state.pending_control.push(
+                json!({ "t": "pong", "id": id, "t0": t0, "agentMs": now_ms(), "rtp": rtp })
+                    .to_string(),
+            );
         }
         ControlToAgent::VideoSettings { video } => {
             if !state.ctx.settings.streaming.allow_client_overrides
@@ -656,13 +748,24 @@ fn write_video(rtc: &mut Rtc, state: &mut State, video: EncodedVideo) {
         return;
     };
     if let Some(writer) = rtc.writer(mid) {
-        match writer.write(
-            pt,
-            video.captured_at,
-            MediaTime::from_90khz(video.rtp_time),
-            video.data,
-        ) {
-            Ok(()) => state.sent_bytes.2 += 1,
+        // Minimum and maximum playout delay of zero: the iPad shows each frame as soon as it is
+        // decoded instead of holding it in an adaptive jitter buffer (50–200 ms in Safari, which
+        // ignores `jitterBufferTarget`). Ignored when the extension was not negotiated.
+        match writer
+            .playout_delay(MediaTime::ZERO, MediaTime::ZERO)
+            .write(
+                pt,
+                video.captured_at,
+                MediaTime::from_90khz(video.rtp_time),
+                video.data,
+            ) {
+            Ok(()) => {
+                state.sent_bytes.2 += 1;
+                // The RTP header carries the timestamp truncated to 32 bits.
+                state
+                    .tracker
+                    .on_frame_written(video.rtp_time as u32, Instant::now());
+            }
             Err(error) => tracing::debug!(%error, "video write failed"),
         }
     }
@@ -722,11 +825,15 @@ fn periodic(state: &mut State) {
         let input_rate = state.input_total as f32 / elapsed.as_secs_f32();
         state.sent_bytes = (0, Instant::now(), 0);
         state.input_total = 0;
+        let queue = state.tracker.take_delay();
         let stats = {
             let mut shared = state.ctx.stats.lock();
             shared.stats.sent_kbps = kbps;
             shared.stats.sent_fps = sent_fps;
             shared.stats.input_events_per_sec = input_rate;
+            shared.stats.send_queue_ms = queue.average_ms;
+            shared.stats.send_queue_max_ms = queue.max_ms;
+            shared.stats.zero_playout_delay = state.zero_playout_delay;
             shared.stats.clone()
         };
         {

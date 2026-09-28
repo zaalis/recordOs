@@ -1,6 +1,6 @@
 // Bump this when a client-side recovery fix ships.  It makes a previously
 // installed iPad PWA discard the old shell instead of reviving a stale bundle.
-const CACHE = 'vision-pro-shell-v7';
+const CACHE = 'vision-pro-shell-v8';
 const SHELL = ['/', '/manifest.webmanifest', '/icons/icon.svg'];
 // With only a USB cable (no Wi-Fi) the app's `.local` name may never resolve.
 // Serve the installed shell after this delay instead of leaving the iPad on a

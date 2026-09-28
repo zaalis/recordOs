@@ -1,5 +1,6 @@
 //! Media: codec negotiation, capture → encode → WebRTC pipeline, input dispatch.
 
+pub mod backlog;
 pub mod codec;
 pub mod engine;
 pub mod rtc;

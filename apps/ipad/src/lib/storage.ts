@@ -56,13 +56,16 @@ export interface Preferences {
   keyboardExtras: string[];
 }
 
+/** Bumped whenever DEFAULT_VIDEO_SETTINGS changes (see loadPreferences). */
+const VIDEO_DEFAULT_VERSION = 4;
+
 export const DEFAULT_PREFERENCES: Preferences = {
   deviceName: 'iPad',
   onboarded: false,
   controlMode: 'direct',
   stageMode: 'stream',
   video: DEFAULT_VIDEO_SETTINGS,
-  videoDefaultVersion: 3,
+  videoDefaultVersion: VIDEO_DEFAULT_VERSION,
   trackingSpeed: 1,
   scrollSpeed: 1,
   naturalScrolling: true,
@@ -137,29 +140,45 @@ export async function saveIdentity(identity: DeviceIdentity): Promise<void> {
 
 export async function loadPreferences(): Promise<Preferences> {
   const stored = await run<Partial<Preferences> | undefined>('kv', 'readonly', (s) => s.get('preferences'));
+  return preferencesFrom(stored);
+}
+
+/** Complete preferences from what an earlier version stored, migrating former defaults. */
+export function preferencesFrom(stored: Partial<Preferences> | undefined): Preferences {
   // Drop the language preference written by earlier versions: Vision-Pro is
   // intentionally French-only now.
   const { language: _legacyLanguage, autoHideToolbar: _legacyAutoHide, ...saved } = (stored ?? {}) as Partial<Preferences> & { language?: unknown };
   const video = { ...DEFAULT_PREFERENCES.video, ...saved.video };
-  // Migrate only exact former defaults. Any combination the user deliberately
-  // changed in the settings panel remains untouched.
-  const legacyAggressiveVideo = saved.videoDefaultVersion !== 3
+  // Migrate only exact former defaults, once each. Any combination the user
+  // deliberately changed in the settings panel remains untouched.
+  const version = saved.videoDefaultVersion ?? 0;
+  const legacyAggressiveVideo = version < 3
     && video.profile === 'max-quality'
     && video.resolution === '2160p'
     && video.fps === 'auto'
     && video.bitrate === 'max'
     && video.codec === 'auto';
-  const legacyResponsiveVideo = saved.videoDefaultVersion !== 3
+  const legacyResponsiveVideo = version < 3
     && video.profile === 'balanced'
     && video.resolution === 'auto'
     && video.fps === 'auto'
     && video.bitrate === 'auto'
     && video.codec === 'auto';
+  // Version 3 shipped 1080p at 30 FPS; the default is now 60 FPS.
+  const legacyBaseline30 = version < 4
+    && video.profile === 'balanced'
+    && video.resolution === '1080p'
+    && video.fps === 30
+    && video.bitrate === 'auto'
+    && video.codec === 'h264'
+    && video.customWidth === undefined
+    && video.customHeight === undefined
+    && video.customKbps === undefined;
   return {
     ...DEFAULT_PREFERENCES,
     ...saved,
-    video: legacyAggressiveVideo || legacyResponsiveVideo ? { ...DEFAULT_PREFERENCES.video } : video,
-    videoDefaultVersion: 3,
+    video: legacyAggressiveVideo || legacyResponsiveVideo || legacyBaseline30 ? { ...DEFAULT_PREFERENCES.video } : video,
+    videoDefaultVersion: VIDEO_DEFAULT_VERSION,
     toolbar: { ...DEFAULT_PREFERENCES.toolbar, ...saved.toolbar },
     // Session controls always disappear after five seconds. This migration
     // also fixes iPads where an older build persisted the option as disabled.

@@ -367,7 +367,8 @@ mod tests {
         assert_eq!(resolve_size(&s, (3840, 2160), &client), (3840, 2160));
         s.resolution = ResolutionMode::Native;
         assert_eq!(resolve_size(&s, (3440, 1440), &client), (3440, 1440));
-        assert_eq!(resolve_fps(&s, 60, 120.0), 30);
+        assert_eq!(resolve_fps(&s, 60, 120.0), 60);
+        assert_eq!(resolve_fps(&s, 144, 60.0), 60);
         s.fps = FpsSetting::Fixed(120);
         assert_eq!(resolve_fps(&s, 144, 120.0), 120);
         assert_eq!(resolve_fps(&s, 144, 60.0), 60);

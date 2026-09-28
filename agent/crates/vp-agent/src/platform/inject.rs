@@ -62,6 +62,7 @@ impl InjectorHandle {
         let thread = std::thread::Builder::new()
             .name("vp-input".into())
             .spawn(move || {
+                super::system::prioritize_current_thread();
                 let mut injector = Injector::new(display, policy);
                 injector.run(receiver);
             })
@@ -391,6 +392,12 @@ impl Injector {
                     return;
                 }
             }
+        }
+        // Hover samples travel on the unordered real-time channel and are only sent while the
+        // pencil is lifted. One overtaken by the stroke's Down would report the pen out of
+        // contact and cut the stroke in two: during contact it can only be stale.
+        if matches!(sample.phase, PenPhase::Hover) && self.pen_in_contact {
+            return;
         }
         // Windows expects the pen to be in range before contact.
         if matches!(sample.phase, PenPhase::Down) && !self.pen_in_range {

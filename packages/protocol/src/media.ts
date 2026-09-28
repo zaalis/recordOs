@@ -19,12 +19,12 @@ export interface VideoSettings {
 }
 
 export const DEFAULT_VIDEO_SETTINGS: VideoSettings = {
-  // A stable 1080p H.264 stream at 30 FPS is the reliable baseline for an
-  // interactive iPad surface in both Safari and Chrome. Higher modes remain
-  // available as explicit user choices.
+  // 1080p H.264 at 60 FPS: every iPad decodes it in hardware, and a 30 FPS
+  // stream alone added up to ~50 ms of frame waiting and display time to
+  // every interaction. Higher modes remain available as explicit choices.
   profile: 'balanced',
   resolution: '1080p',
-  fps: 30,
+  fps: 60,
   bitrate: 'auto',
   codec: 'h264',
 };
@@ -173,4 +173,12 @@ export interface AgentStats {
   height: number;
   inputEventsPerSec: number;
   inputProcessMs: number;
+  /** Average time a frame waited in the PC's send queue before leaving (absent on older PCs). */
+  sendQueueMs?: number;
+  /** Longest such wait during the last second. */
+  sendQueueMaxMs?: number;
+  /** Milliseconds per second the PC held encoding back because the network was congested. */
+  heldMs?: number;
+  /** The PC asked this iPad to show frames as soon as they are decoded (no jitter buffer). */
+  zeroPlayoutDelay?: boolean;
 }

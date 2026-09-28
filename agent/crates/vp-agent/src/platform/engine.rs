@@ -5,6 +5,7 @@ use super::gpu;
 use super::inject::InjectorHandle;
 use super::pipeline::{self, PipelineConfig};
 use crate::config::NetworkMode;
+use crate::media::backlog::SendBacklog;
 use crate::media::codec::{self, EncoderCapability};
 use crate::media::rtc::{self, PipelineCommand, PipelineStats, RtcContext};
 use crate::media::{MediaContext, MediaEngine, MediaHandle, MediaRequest, MediaStarted};
@@ -175,6 +176,10 @@ impl MediaEngine for WindowsMediaEngine {
         let (commands_tx, commands_rx) = crossbeam_channel::unbounded();
         let stats = Arc::new(Mutex::new(PipelineStats::default()));
         let initial_bitrate_kbps = rtc::initial_bwe_kbps(kbps);
+        // RTP timestamps count from this instant; the network task shares it to let the iPad
+        // map a displayed frame back to its capture time.
+        let epoch = Instant::now();
+        let backlog = Arc::new(SendBacklog::new(epoch));
         let capture_thread = pipeline::spawn(
             PipelineConfig {
                 codec: choice.codec,
@@ -185,6 +190,8 @@ impl MediaEngine for WindowsMediaEngine {
                 display_id: Some(output.id.clone()),
                 prevent_sleep: settings.display.prevent_sleep,
                 initial_bitrate_kbps,
+                epoch,
+                backlog: backlog.clone(),
             },
             video_tx,
             events_tx,
@@ -206,6 +213,8 @@ impl MediaEngine for WindowsMediaEngine {
             stop: stop_rx,
             stats,
             settings,
+            epoch,
+            backlog,
         };
         tokio::runtime::Handle::current().spawn(rtc::run(negotiated, rtc_context));
 
