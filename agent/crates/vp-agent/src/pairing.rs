@@ -130,12 +130,18 @@ impl PairingManager {
         }
     }
 
-    /// Registers the single pending approval. Returns `None` if another request is already waiting.
+    /// Registers the single pending approval. A reconnect from the same device
+    /// replaces its earlier request, which commonly happens when mobile Safari
+    /// reloads the QR page before the old WebSocket close reaches the PC.
+    /// Requests from a different device remain serialized.
     pub fn begin(&self, info: PairingRequestInfo) -> Option<oneshot::Receiver<bool>> {
         let mut guard = self.pending.lock();
-        if guard.as_ref().is_some_and(|p| {
-            p.info.expires_at > now_ms() && p.responder.as_ref().is_some_and(|r| !r.is_closed())
-        }) {
+        let active_other_device = guard.as_ref().is_some_and(|p| {
+            p.info.expires_at > now_ms()
+                && p.responder.as_ref().is_some_and(|r| !r.is_closed())
+                && p.info.device_id != info.device_id
+        });
+        if active_other_device {
             return None;
         }
         let (tx, rx) = oneshot::channel();
@@ -188,6 +194,20 @@ impl PairingManager {
 mod tests {
     use super::*;
 
+    fn request(id: &str, device_id: &str) -> PairingRequestInfo {
+        PairingRequestInfo {
+            id: id.to_string(),
+            device_id: device_id.to_string(),
+            device_name: "iPad".to_string(),
+            device_kind: "tablet".to_string(),
+            ip: "192.168.1.5".to_string(),
+            sas: "123456".to_string(),
+            method: "qr".to_string(),
+            created_at: now_ms(),
+            expires_at: now_ms() + 60_000,
+        }
+    }
+
     #[test]
     fn code_attempts_are_limited() {
         let manager = PairingManager::default();
@@ -208,5 +228,17 @@ mod tests {
         assert!(manager.verify_proof("code", &old, &transcript).is_err());
         let qr = crate::util::b64u(&crypto::pair_proof_mac(&window.token, &transcript));
         assert_eq!(manager.verify_proof("qr", &qr, &transcript), Ok("qr"));
+    }
+
+    #[test]
+    fn retry_from_same_device_replaces_pending_request() {
+        let manager = PairingManager::default();
+        let mut first = manager.begin(request("first", "ipad-1")).unwrap();
+        let _second = manager.begin(request("second", "ipad-1")).unwrap();
+        assert!(matches!(
+            first.try_recv(),
+            Err(oneshot::error::TryRecvError::Closed)
+        ));
+        assert!(manager.begin(request("third", "ipad-2")).is_none());
     }
 }

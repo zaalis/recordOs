@@ -120,7 +120,7 @@ pub struct Agent {
     core: Arc<Core>,
     runtime: tokio::runtime::Runtime,
     service: Mutex<Option<Service>>,
-    bootstrap: Mutex<Option<ServerHandle>>,
+    bootstrap: Mutex<Option<(ServerHandle, u16)>>,
     last_error: Mutex<Option<String>>,
 }
 
@@ -436,18 +436,30 @@ impl Agent {
         } else {
             self.core.pairing.open_window()
         };
-        {
+        let bootstrap_port = {
             let mut bootstrap = self.bootstrap.lock();
             if bootstrap.is_none() {
                 match self
                     .runtime
                     .block_on(server::start_bootstrap(self.core.clone()))
                 {
-                    Ok(handle) => *bootstrap = Some(handle),
+                    Ok((handle, port)) => {
+                        if port != server::BOOTSTRAP_PORT {
+                            self.core.audit.record(
+                                Severity::Notice,
+                                "pair.bootstrap-fallback",
+                                format!(
+                                    "The pairing setup port was occupied; Vision-Pro is using alternate local port {port}."
+                                ),
+                            );
+                        }
+                        *bootstrap = Some((handle, port));
+                    }
                     Err(error) => tracing::warn!(%error, "bootstrap listener unavailable"),
                 }
             }
-        }
+            bootstrap.as_ref().map(|(_, port)| *port)
+        };
         let settings = self.core.settings.read().clone();
         let identity = self.core.identity.read().clone();
         let fragment = format!(
@@ -457,12 +469,20 @@ impl Agent {
             window.token,
             url_encode(&settings.computer_name)
         );
+        // Do not fall back to the mDNS `.local` hostname for a QR. Some iPads
+        // resolve it to their own 127.0.0.1, which makes an otherwise valid QR
+        // look like a refused connection. The certificate includes LAN IPs.
+        let lan_ip = crate::net::primary_lan_ip();
+        let connection_host = lan_ip
+            .map(|ip| ip.to_string())
+            .unwrap_or_else(|| self.core.hostname.clone());
         let url = format!(
-            "https://{}:{}/{}",
-            self.core.hostname, settings.network.https_port, fragment
+            "https://{connection_host}:{}/{}",
+            settings.network.https_port, fragment
         );
-        let setup_url = crate::net::primary_lan_ip()
-            .map(|ip| format!("http://{ip}:{}/{}", server::BOOTSTRAP_PORT, fragment));
+        let setup_url = bootstrap_port
+            .zip(lan_ip)
+            .map(|(port, ip)| format!("http://{ip}:{port}/{fragment}"));
         let _ = self.core.events.send(AgentEvent::ConnectWindowChanged);
         Ok(ConnectInfo {
             qr_svg: qr_svg(&url)?,
@@ -487,7 +507,7 @@ impl Agent {
         self.core.pairing.close_window();
         let handle = {
             let _guard = self.runtime.enter();
-            self.bootstrap.lock().take()
+            self.bootstrap.lock().take().map(|(handle, _)| handle)
         };
         drop(handle);
         let _ = self.core.events.send(AgentEvent::ConnectWindowChanged);

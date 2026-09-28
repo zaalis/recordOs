@@ -443,7 +443,13 @@ async fn session<T: SignalTransport>(
 
         // Wait for the PC user, the timeout, or the iPad giving up — whichever comes first.
         let outcome = tokio::select! {
-            result = decision => if result.unwrap_or(false) { "approved" } else { "denied" },
+            result = decision => match result {
+                Ok(true) => "approved",
+                Ok(false) => "denied",
+                // The pairing manager drops the old responder when this same device
+                // reconnects, so that retry must not be counted as a user denial.
+                Err(_) => "cancelled",
+            },
             _ = tokio::time::sleep(Duration::from_secs(timeout_secs)) => "expired",
             _ = wait_for_close(ctx.transport, &mut channel) => "cancelled",
         };

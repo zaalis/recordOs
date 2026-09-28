@@ -86,10 +86,33 @@ pub async fn start(core: Arc<Core>) -> anyhow::Result<ServerHandle> {
 }
 
 /// Starts the bootstrap listener; it stops when the returned handle is dropped.
-pub async fn start_bootstrap(core: Arc<Core>) -> anyhow::Result<ServerHandle> {
+///
+/// The preferred port is stable so an already-open QR keeps working. If another
+/// local program owns it, use an ephemeral port instead: the QR contains the
+/// actual port, so pairing does not need to fail or interfere with that program.
+pub async fn start_bootstrap(core: Arc<Core>) -> anyhow::Result<(ServerHandle, u16)> {
     let (shutdown, rx) = watch::channel(false);
-    let listener =
-        TcpListener::bind(SocketAddr::from((Ipv4Addr::UNSPECIFIED, BOOTSTRAP_PORT))).await?;
+    let listener = match TcpListener::bind(SocketAddr::from((
+        Ipv4Addr::UNSPECIFIED,
+        BOOTSTRAP_PORT,
+    )))
+    .await
+    {
+        Ok(listener) => listener,
+        Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
+            tracing::warn!(
+                port = BOOTSTRAP_PORT,
+                "bootstrap port is occupied; using an alternate port"
+            );
+            TcpListener::bind(SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)))
+                .await
+                .map_err(|fallback_error| anyhow::anyhow!(
+                    "bootstrap port {BOOTSTRAP_PORT} is unavailable ({error}); alternate port is unavailable: {fallback_error}"
+                ))?
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let port = listener.local_addr()?.port();
     let router = bootstrap_router(core.clone());
     tokio::spawn(async move {
         let mut rx = rx;
@@ -102,13 +125,13 @@ pub async fn start_bootstrap(core: Arc<Core>) -> anyhow::Result<ServerHandle> {
                         continue;
                     }
                     let router = router.clone();
-                    let local = stream.local_addr().unwrap_or(SocketAddr::from((Ipv4Addr::UNSPECIFIED, BOOTSTRAP_PORT)));
+                    let local = stream.local_addr().unwrap_or(SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)));
                     tokio::spawn(serve_http(TokioIo::new(stream), peer, local, router, false));
                 }
             }
         }
     });
-    Ok(ServerHandle { shutdown })
+    Ok((ServerHandle { shutdown }, port))
 }
 
 static NONLOCAL_LOG_BUDGET: AtomicU64 = AtomicU64::new(0);
@@ -437,11 +460,7 @@ async fn static_handler(request: Request<Body>) -> Response<Body> {
 }
 
 fn bootstrap_router(core: Arc<Core>) -> Router {
-    let target = format!(
-        "https://{}:{}",
-        core.hostname,
-        core.settings.read().network.https_port
-    );
+    let target = bootstrap_target(&core);
     Router::new()
         .route("/", get(bootstrap_page))
         .route("/setup.js", get(bootstrap_script))
@@ -460,7 +479,7 @@ async fn bootstrap_page(State(core): State<Arc<Core>>) -> impl IntoResponse {
         .map(|a| a.fingerprint_sha256())
         .unwrap_or_default();
     let settings = core.settings.read().clone();
-    let target = format!("https://{}:{}/", core.hostname, settings.network.https_port);
+    let target = format!("{}/", bootstrap_target(&core));
     let html = include_str!("bootstrap.html")
         .replace("{{NAME}}", &html_escape(&settings.computer_name))
         .replace("{{TARGET}}", &html_escape(&target))
@@ -472,6 +491,17 @@ async fn bootstrap_page(State(core): State<Arc<Core>>) -> impl IntoResponse {
         ],
         html,
     )
+}
+
+/// The bootstrap QR is reached by a concrete LAN address. Keep using that form
+/// after the trust profile is installed: some iPad DNS configurations resolve
+/// an mDNS `.local` hostname to their own loopback address (127.0.0.1).
+fn bootstrap_target(core: &Core) -> String {
+    let settings = core.settings.read();
+    let host = crate::net::primary_lan_ip()
+        .map(|ip| ip.to_string())
+        .unwrap_or_else(|| core.hostname.clone());
+    format!("https://{host}:{}", settings.network.https_port)
 }
 
 async fn bootstrap_script() -> impl IntoResponse {

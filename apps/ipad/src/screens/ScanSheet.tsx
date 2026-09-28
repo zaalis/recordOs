@@ -5,6 +5,14 @@ import { useEffect, useRef, useState } from 'react';
 import { connection } from '../lib/connection.ts';
 import { store } from '../lib/store.ts';
 
+function isPrivateBootstrapHost(host: string) {
+  const octets = host.split('.').map(Number);
+  const [first, second] = octets;
+  return octets.length === 4
+    && octets.every((part) => Number.isInteger(part) && part >= 0 && part <= 255)
+    && (first === 10 || first === 127 || (first === 192 && second === 168) || (first === 172 && second !== undefined && second >= 16 && second <= 31) || (first === 169 && second === 254));
+}
+
 /** In-app QR scanner. The camera stream never leaves the iPad and stops when the sheet closes. */
 export function ScanSheet({ open, onClose }: { open: boolean; onClose: () => void }) {
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -30,7 +38,9 @@ export function ScanSheet({ open, onClose }: { open: boolean; onClose: () => voi
       const isSecureApp = url.protocol === 'https:';
       // The desktop shows the short-lived HTTP bootstrap QR on purpose: it lets
       // iPadOS install this PC's local certificate before opening its HTTPS app.
-      const isLocalBootstrap = url.protocol === 'http:' && url.port === '47801' && (url.pathname === '/' || url.pathname === '');
+      // The bootstrap listener normally uses 47801, but it can intentionally
+      // choose another free local port if a different program owns that port.
+      const isLocalBootstrap = url.protocol === 'http:' && !!url.port && isPrivateBootstrapHost(url.hostname) && (url.pathname === '/' || url.pathname === '');
       if (!link || (!isSecureApp && !isLocalBootstrap)) {
         setError('Ce code QR n’est pas un code d’association Vision-Pro valide. Ouvrez « Connecter un appareil » sur le PC et scannez le code affiché.');
         return true;
