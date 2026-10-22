@@ -1,5 +1,5 @@
 /**
- * Optional Vision-Pro account (served by the account server). Sessions use Secure, HttpOnly,
+ * Optional Record OS account (served by the account server). Sessions use Secure, HttpOnly,
  * SameSite=Strict cookies; state-changing requests carry a double-submit CSRF token.
  * Passkeys are preferred; passwords are hashed with Argon2id on the server.
  */

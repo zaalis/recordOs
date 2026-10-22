@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="dark light">
-<title>Vision-Pro · Préparer cet iPad</title>
+<title>Record OS · Préparer cet iPad</title>
 <style>
   :root { --bg:#000; --fg:#f5f5f7; --muted:#8e8e93; --line:rgba(255,255,255,.12); --card:rgba(255,255,255,.06); --ok:#30d158; }
   @media (prefers-color-scheme: light) { :root { --bg:#fbfbfd; --fg:#1d1d1f; --muted:#6e6e73; --line:rgba(0,0,0,.1); --card:#fff; } }
@@ -32,18 +32,18 @@
 </head>
 <body>
 <main>
-  <p class="brand">Vision-Pro</p>
+  <p class="brand">Record OS</p>
   <h1>Préparer cet iPad</h1>
   <p class="lead">Une seule fois par iPad : le profil permet à cet iPad de vérifier la connexion chiffrée avec <b>{{NAME}}</b>. Il ne vaut que pour votre réseau local et votre réseau Tailscale.</p>
   <ol id="steps" hidden>
     <li><span class="n">1</span><div><b>Télécharger le profil</b><small>Appuyez sur « Télécharger le profil » puis sur Autoriser.</small></div></li>
     <li><span class="n">2</span><div><b>L’installer</b><small>Réglages → Profil téléchargé → Installer.</small></div></li>
-    <li><span class="n">3</span><div><b>Activer la confiance totale</b><small>Réglages → Général → Informations → Réglages de confiance des certificats → Autorité locale Vision-Pro.</small></div></li>
-    <li><span class="n">4</span><div><b>Revenir ici</b><small>Vision-Pro s’ouvre tout seul : entrez le code affiché sur le PC.</small></div></li>
+    <li><span class="n">3</span><div><b>Activer la confiance totale</b><small>Réglages → Général → Informations → Réglages de confiance des certificats → Autorité locale Record OS.</small></div></li>
+    <li><span class="n">4</span><div><b>Revenir ici</b><small>Record OS s’ouvre tout seul : entrez le code affiché sur le PC.</small></div></li>
   </ol>
   <p class="status" id="status"><span class="dot"></span><span id="status-text">Vérification de la connexion sécurisée…</span></p>
   <div class="actions">
-    <a class="btn primary" id="continue" href="{{TARGET}}" data-target="{{TARGET}}">Continuer vers Vision-Pro</a>
+    <a class="btn primary" id="continue" href="{{TARGET}}" data-target="{{TARGET}}">Continuer vers Record OS</a>
     <a class="btn secondary" href="/vision-pro.mobileconfig">Télécharger le profil</a>
   </div>
   <p class="fp">Authority SHA-256 · {{FINGERPRINT}}</p>

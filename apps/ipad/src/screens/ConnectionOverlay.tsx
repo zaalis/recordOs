@@ -41,7 +41,7 @@ export function ConnectionOverlay() {
         <h2>{title}</h2>
         {pairing && state.sas ? (
           <>
-            <p>Vérifiez que ce code est le même que celui affiché par Vision-Pro sur Windows, puis autorisez la demande sur le PC.</p>
+            <p>Vérifiez que ce code est le même que celui affiché par Record OS sur Windows, puis autorisez la demande sur le PC.</p>
             <div className="sas" aria-label={`Security code ${state.sas}`}>{state.sas}</div>
           </>
         ) : (

@@ -14,7 +14,7 @@
       .then(function () {
         leaving = true;
         status.className = 'status ok';
-        text.textContent = 'Connexion sécurisée prête. Ouverture de Vision-Pro…';
+        text.textContent = 'Connexion sécurisée prête. Ouverture de Record OS…';
         location.replace(target);
       })
       .catch(function () {

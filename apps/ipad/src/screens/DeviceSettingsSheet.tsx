@@ -1,6 +1,8 @@
 import { Button, Group, Row, Segmented, Sheet, Switch, useToast } from '@vision-pro/design';
 import { useState } from 'react';
 import { removeComputer, updatePrefs, useApp } from '../lib/store.ts';
+import { exportConnectionDiagnostics } from '../lib/connection.ts';
+import { StyleSettings } from './StyleSettings.tsx';
 import { resetEverything } from '../lib/storage.ts';
 
 export function DeviceSettingsSheet({ open, onClose }: { open: boolean; onClose: () => void }) {
@@ -15,7 +17,7 @@ export function DeviceSettingsSheet({ open, onClose }: { open: boolean; onClose:
       return;
     }
     try {
-      await resetEverything(() => toast('Close other Vision-Pro tabs to finish resetting this iPad.', { icon: 'alert', tone: 'orange' }));
+      await resetEverything(() => toast('Close other Record OS tabs to finish resetting this iPad.', { icon: 'alert', tone: 'orange' }));
       location.reload();
     } catch {
       toast('The reset could not be completed. Please try again.', { icon: 'alert', tone: 'orange' });
@@ -52,11 +54,13 @@ export function DeviceSettingsSheet({ open, onClose }: { open: boolean; onClose:
         />
       </Group>
 
+      <StyleSettings />
       <Group title="Experience">
         <Row icon="sparkle" title="Automatic creative profiles" subtitle="Match controls to the active Windows app" accessory={<Switch label="Automatic creative profiles" checked={prefs.autoProfiles} onChange={(autoProfiles) => updatePrefs({ autoProfiles })} />} />
         <Row icon="stats" title="Performance statistics" accessory={<Switch label="Performance statistics" checked={prefs.showStats} onChange={(showStats) => updatePrefs({ showStats })} />} />
       </Group>
 
+      <Group title="Diagnostic"><Button variant="ghost" block onClick={exportConnectionDiagnostics}>Exporter le diagnostic de connexion</Button></Group>
       <Group title="Paired computers" footer="Retirer un ordinateur efface son autorisation locale sur cet iPad. Supprimez l’iPad depuis Windows pour couper son accès et effacer sa fiche sur le PC.">
         {computers.length === 0 ? (
           <Row icon="computer" title="No paired computers" />

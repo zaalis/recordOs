@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { RelayStatus, UsbLink, UsbStatus, UsbTablet } from './api.ts';
 import { api, type AgentStatus, type AuditEntry, type ConnectAddress, type ConnectInfo, type Device, type Settings } from './api.ts';
 import { useDesktopLanguage } from './i18n.ts';
+import { ConnectDialog } from './ConnectDialog.tsx';
 
 type Page = 'home' | 'devices' | 'display' | 'input' | 'security' | 'network' | 'advanced' | 'about';
 const nav: { id: Page; label: string; icon: IconName }[] = [
@@ -74,12 +75,12 @@ export function App() {
     catch (error) { toast(String(error), { icon: 'alert', tone: 'red' }); }
   };
 
-  if (!status || !settings) return <div className="desktop-loading"><span className="vp-spinner" /><span>Starting Vision-Pro…</span></div>;
+  if (!status || !settings) return <div className="desktop-loading"><span className="vp-spinner" /><span>Starting Record OS…</span></div>;
 
   return (
     <div className="desktop-shell">
       <aside className="sidebar">
-        <div className="desktop-wordmark">Vision-Pro</div>
+        <div className="desktop-wordmark">Record OS</div>
         <nav aria-label="Main navigation">{nav.map((item) => <button key={item.id} type="button" className="nav-item" aria-current={page === item.id ? 'page' : undefined} onClick={() => setPage(item.id)}><Icon name={item.icon} size={19} /><span>{item.label}</span>{item.id === 'devices' && devices.length > 0 && <span className="nav-count">{devices.length}</span>}</button>)}</nav>
         <div className="sidebar-status"><span className="vp-dot" data-tone={status.running ? 'green' : 'red'} /><div><b>{status.running ? 'Ready' : 'Stopped'}</b><small>{status.networkMode === 'local-only' ? 'Local network only' : status.relay.state === 'connected' ? 'Remote access' : 'Relay unreachable'}</small>{status.usb.links.length > 0 && <small className="sidebar-usb"><Icon name="cable" size={12} /> Câble USB actif</small>}</div></div>
       </aside>
@@ -88,7 +89,7 @@ export function App() {
         <header className="desktop-header"><div><p className="eyebrow">{status.computerName}</p><h1>{nav.find((item) => item.id === page)?.label}</h1></div><div className="header-actions"><Button onClick={() => void service()} loading={busy}>{status.running ? 'Stop service' : 'Start service'}</Button><Button variant="primary" icon="plus" onClick={() => void openConnect()} disabled={!status.running} loading={busy}>Connect Device</Button></div></header>
         {status.error && <div className="desktop-alert" data-tone="red"><Icon name="alert" /><span>{status.error}</span></div>}
         {status.storeIntegrityWarning && <div className="desktop-alert" data-tone="orange"><Icon name="shield" /><span>The device store failed its integrity check. Every device now requires confirmation.</span></div>}
-        {status.pendingPairing && <PairingBanner request={status.pendingPairing} onRespond={async (approve) => { await api.respondPairing(status.pendingPairing!.id, approve); await refresh(); }} />}
+        {status.pendingPairing && !connect && <PairingBanner request={status.pendingPairing} onRespond={async (approve) => { await api.respondPairing(status.pendingPairing!.id, approve); await refresh(); }} />}
 
         <div className="desktop-content">
           {page === 'home' && <Overview status={status} devices={devices} audit={audit} onConnect={openConnect} onAllowUsb={allowUsb} onEmergency={async () => { const count = await api.emergency(); toast(`${count} connexion${count === 1 ? '' : 's'} arrêtée${count === 1 ? '' : 's'}.`, { icon: 'power', tone: 'orange' }); await refresh(); }} />}
@@ -101,7 +102,7 @@ export function App() {
           {page === 'about' && <About status={status} />}
         </div>
       </main>
-      {connect && <ConnectDialog info={connect} paired={devices.filter((d) => d.pairedAt >= connectOpenedAt).sort((a, b) => b.pairedAt - a.pairedAt)[0]} onRefresh={async () => setConnect(await api.openConnect(true))} onClose={() => { setConnect(null); void api.closeConnect(); }} />}
+      {connect && <ConnectDialog info={connect} request={status.pendingPairing} onRespond={async (id, approve) => { if (!await api.respondPairing(id, approve)) throw new Error("Cette demande a expiré. Recommencez depuis l’iPad."); await refresh(); }} paired={devices.filter((d) => d.pairedAt >= connectOpenedAt).sort((a, b) => b.pairedAt - a.pairedAt)[0]} onRefresh={async () => setConnect(await api.openConnect(true))} onClose={() => { setConnect(null); void api.closeConnect(); }} />}
     </div>
   );
 }
@@ -109,7 +110,7 @@ export function App() {
 function Overview({ status, devices, audit, onConnect, onEmergency, onAllowUsb }: { status: AgentStatus; devices: Device[]; audit: AuditEntry[]; onConnect: () => void; onEmergency: () => void; onAllowUsb: (link: UsbLink) => Promise<void> }) {
   const session = status.sessions[0];
   return <>
-    <section className="status-hero" data-connected={session ? 'true' : undefined}><div className="status-orb"><span className="vp-dot" data-tone={status.running ? 'green' : 'red'} /></div><div className="status-copy"><p className="eyebrow">Status</p><h2>{session ? 'Connected' : status.running ? 'Ready' : 'Service stopped'}</h2><p>{session ? (session.permission === 'control' ? `${session.deviceName} pilote ce PC.` : `${session.deviceName} est connecté, commandes désactivées.`) : status.running ? 'Vision-Pro attend de manière sécurisée sur votre réseau privé.' : 'Démarrez le service pour rendre ce PC disponible.'}</p></div>{session ? <Button variant="danger" icon="power" onClick={onEmergency}>Disconnect</Button> : <Button variant="primary" icon="plus" onClick={onConnect} disabled={!status.running}>Connect Device</Button>}</section>
+    <section className="status-hero" data-connected={session ? 'true' : undefined}><div className="status-orb"><span className="vp-dot" data-tone={status.running ? 'green' : 'red'} /></div><div className="status-copy"><p className="eyebrow">Status</p><h2>{session ? 'Connected' : status.running ? 'Ready' : 'Service stopped'}</h2><p>{session ? (session.permission === 'control' ? `${session.deviceName} pilote ce PC.` : `${session.deviceName} est connecté, commandes désactivées.`) : status.running ? 'Record OS attend de manière sécurisée sur votre réseau privé.' : 'Démarrez le service pour rendre ce PC disponible.'}</p></div>{session ? <Button variant="danger" icon="power" onClick={onEmergency}>Disconnect</Button> : <Button variant="primary" icon="plus" onClick={onConnect} disabled={!status.running}>Connect Device</Button>}</section>
     <div className="summary-grid"><Summary icon={session?.link === 'usb' ? 'cable' : 'tablet'} label="Connected device" value={session?.deviceName ?? 'None'} detail={session ? `${session.ip}${session.link === 'usb' ? ' · câble USB' : session.viaRelay ? ' · via relay' : ''}` : `${devices.filter((d) => d.status === 'trusted').length} trusted`} /><Summary icon="display" label="Display" value={(status.caps.displays.find((d) => d.id === status.caps.activeDisplayId) ?? status.caps.displays[0])?.name ?? 'Unavailable'} detail={status.caps.displays.length > 1 ? `${status.caps.displays.length} écrans` : 'Écran piloté'} /><Summary icon="gauge" label="Latency" value={session?.rttMs != null ? formatMs(session.rttMs / 2) : '—'} detail={session ? `${Math.round(session.inputRate)} commandes/s` : 'Aucune session'} /><Summary icon="shield" label="Security" value="Protected" detail={status.networkMode === 'local-only' ? 'Local Only' : 'Remote Access'} /></div>
     {status.usb.enabled && (status.usb.links.length > 0 || status.usb.devices.length > 0) && <UsbCard usb={status.usb} sessions={status.sessions} onAllow={onAllowUsb} />}
     {session && <section className="desktop-card"><CardTitle title="Session en cours" subtitle={session.activeApp ?? 'Bureau Windows'} action={<Badge tone="green" dot>{session.link === 'usb' ? 'Câble USB' : session.viaRelay ? 'Relais' : 'Connecté'}</Badge>} /><div className="live-metrics"><Metric value={session.rttMs != null ? formatMs(session.rttMs / 2) : '—'} label="Latence des commandes" /><Metric value={`${Math.round(session.inputRate)}/s`} label="Commandes reçues" /><Metric value={pathLabel(session)} label="Chemin" /><Metric value={session.permission === 'control' ? 'Activées' : 'Désactivées'} label="Commandes" /></div></section>}
@@ -152,7 +153,7 @@ function usbHint(device: UsbTablet): string {
 }
 
 function linkState(link: UsbLink): { tone: 'green' | 'orange'; text: string; action?: string } {
-  if (link.firewall === 'blocked') return { tone: 'orange', text: `Windows bloque Vision-Pro sur ce réseau ${link.network === 'public' ? '« Public »' : ''}`.trim(), action: 'Autoriser' };
+  if (link.firewall === 'blocked') return { tone: 'orange', text: `Windows bloque Record OS sur ce réseau ${link.network === 'public' ? '« Public »' : ''}`.trim(), action: 'Autoriser' };
   if (link.internet) return { tone: 'orange', text: 'Internet du PC passe par les données mobiles de la tablette', action: 'Corriger' };
   return { tone: 'green', text: 'Liaison directe par câble' };
 }
@@ -165,7 +166,7 @@ function UsbCard({ usb, sessions, onAllow }: { usb: UsbStatus; sessions: AgentSt
     const onCable = sessions.find((s) => s.link === 'usb' && s.localIp === link.localIp);
     const blocked = link.firewall === 'blocked';
     const detail = blocked
-      ? 'Le pare-feu Windows empêche la tablette de joindre ce PC par le câble. Autorisez la liaison une fois : elle devient un réseau privé réservé à Vision-Pro.'
+      ? 'Le pare-feu Windows empêche la tablette de joindre ce PC par le câble. Autorisez la liaison une fois : elle devient un réseau privé réservé à Record OS.'
       : link.internet
         ? 'Windows envoie l’Internet de ce PC par la tablette, au risque de consommer ses données mobiles. Corrigez une fois : Internet reste sur votre Wi-Fi, le flux reste sur le câble.'
         : onCable ? 'Les commandes passent directement par le câble, sans Wi-Fi.' : 'Dès que la tablette se connecte, toute la session passe par le câble. Une session Wi-Fi en cours bascule automatiquement.';
@@ -192,61 +193,11 @@ function UsbCard({ usb, sessions, onAllow }: { usb: UsbStatus; sessions: AgentSt
   </section>;
 }
 
-function NetworkPage({ status, settings, save, onAllowUsb }: PageProps & { onAllowUsb: (link: UsbLink) => Promise<void> }) {
-  const network = settings.network;
-  const toast = useToast();
-  const [relayUrl, setRelayUrl] = useState(network.relayUrl ?? '');
-  const [relayToken, setRelayToken] = useState(network.relayToken ?? '');
-  useEffect(() => { setRelayUrl(network.relayUrl ?? ''); setRelayToken(network.relayToken ?? ''); }, [network.relayUrl, network.relayToken]);
-  const patch = (value: Partial<Settings['network']>) => void save({ ...settings, network: { ...network, ...value } });
-  const relay = status.relay;
-  const remote = network.mode === 'remote-access';
-  const dirty = relayUrl.trim() !== (network.relayUrl ?? '') || relayToken.trim() !== (network.relayToken ?? '');
-  const saveRelay = () => {
-    const url = relayUrl.trim();
-    const token = relayToken.trim();
-    if (url && !/^((wss|https):\/\/)?[a-z0-9.-]+(:\d{1,5})?\/?$/i.test(url) && !/^(ws|http):\/\/(127\.0\.0\.1|localhost)(:\d{1,5})?\/?$/i.test(url)) {
-      toast('Enter the relay address, for example relay.example.com.', { icon: 'alert', tone: 'red' });
-      return;
-    }
-    if (token && token.length < 16) {
-      toast('The access token must contain at least 16 characters.', { icon: 'alert', tone: 'red' });
-      return;
-    }
-    patch({ relayUrl: url || null, relayToken: token || null });
-  };
-  const relayTitle = relay.state === 'connected' ? 'Reachable from the Internet' : relay.state === 'error' ? 'Relay unreachable' : relay.state === 'connecting' ? 'Connecting to the relay…' : 'Relay inactive';
-  const relayDetail = relay.state === 'connected' ? 'Session chiffrée de bout en bout' : relay.error ?? (network.relayUrl ? 'Save to connect' : 'Enter your relay address');
-  const tailscale = status.addresses.find((address) => /^https:\/\/100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(address));
-  return <SettingsCard title="Network" subtitle="Local Only never exposes the PC to the Internet. Remote Access goes through your own relay, with end-to-end encryption.">
-    <div className="network-modes">
-      <button type="button" aria-pressed={network.mode === 'local-only'} onClick={() => patch({ mode: 'local-only' })}><Icon name="wifi" /><b>Local Only</b><span>Direct iPad ↔ PC connection on your private network.</span><Badge tone="green">Recommended</Badge></button>
-      <button type="button" aria-pressed={remote} onClick={() => patch({ mode: 'remote-access' })}><Icon name="globe" /><b>Remote Access</b><span>Joignez ce PC depuis n’importe quel réseau via votre relais Vision-Pro. Le relais ne voit jamais vos commandes.</span>{relayBadge(network.mode, !!network.relayUrl, relay)}</button>
-    </div>
-    {remote && <Group title="Relay">
-      <label className="text-setting"><span>Relay address</span><input className="vp-input" placeholder="relay.example.com" value={relayUrl} autoCapitalize="off" autoCorrect="off" spellCheck={false} onChange={(event) => setRelayUrl(event.currentTarget.value)} onKeyDown={(event) => { if (event.key === 'Enter' && dirty) saveRelay(); }} /></label>
-      <label className="text-setting"><span>Access token</span><input className="vp-input" type="password" placeholder="Optional" value={relayToken} autoComplete="off" onChange={(event) => setRelayToken(event.currentTarget.value)} onKeyDown={(event) => { if (event.key === 'Enter' && dirty) saveRelay(); }} /></label>
-      <Row icon="globe" title={relayTitle} subtitle={relayDetail} accessory={<Button size="sm" variant={dirty ? 'primary' : 'default'} disabled={!dirty} onClick={saveRelay}>Save</Button>} />
-    </Group>}
-    {remote && <p className="about-note">Associez chaque iPad une fois sur le réseau local. Il se connecte ensuite depuis n’importe où : la clé du PC est épinglée, un code est toujours exigé pour associer via le relais, et les commandes restent chiffrées de bout en bout.</p>}
-    <Group title="Hors de chez vous (Tailscale)">
-      {tailscale
-        ? <Row icon="globe" title="Tailscale actif sur ce PC" subtitle={`Depuis n’importe quel réseau, l’iPad (connecté à Tailscale) ouvre ${tailscale}`} accessory={<Badge tone="green" dot>Prêt</Badge>} />
-        : <Row icon="globe" title="Tailscale n’est pas détecté" subtitle="Installez Tailscale sur ce PC et sur l’iPad avec le même compte : l’iPad joint alors ce PC depuis n’importe où, sans relais ni ouverture de port." accessory={<Badge>Facultatif</Badge>} />}
-    </Group>
-    <Group title="Câble USB">
-      <Row icon="cable" title="Connexion par câble USB" subtitle="Détecte la tablette branchée et fait passer toute la session par le câble" accessory={<Switch label="Connexion par câble USB" checked={network.usbDirect} onChange={(usbDirect) => patch({ usbDirect })} />} />
-      {network.usbDirect && status.usb.links.map((link) => <Row key={link.id} icon="tablet" title={link.deviceName} subtitle={`${linkState(link).text} · ${link.localIp} · ${link.alias}`} accessory={linkState(link).action ? <Button size="sm" variant="primary" onClick={() => void onAllowUsb(link)}>{linkState(link).action}</Button> : <Badge tone="green" dot>Actif</Badge>} />)}
-      {network.usbDirect && status.usb.devices.filter((d) => !status.usb.links.some((l) => l.kind === d.kind)).map((device) => <Row key={device.id} icon="tablet" title={`${device.name} branché`} subtitle={usbHint(device)} accessory={<Badge tone="orange" dot>En attente</Badge>} />)}
-      {network.usbDirect && !status.usb.links.length && !status.usb.devices.length && <Row title="Aucune tablette branchée" subtitle="Branchez l’iPad en USB-C ou avec un câble Lightning ; il est détecté instantanément." />}
-    </Group>
-    {network.usbDirect && <p className="about-note">Le câble transporte la connexion chiffrée et les commandes : aucune box ni Wi-Fi n’est nécessaire. L’iPad crée la liaison réseau par le câble grâce au Partage de connexion ; si le câble est débranché, la session repasse aussitôt par le Wi-Fi.</p>}
-    <Group title="Discovery"><Row title="Advertise this PC nearby" accessory={<Switch label="Advertise this PC nearby" checked={network.advertiseMdns} onChange={(advertiseMdns) => patch({ advertiseMdns })} />} /><NumberSetting label="Secure local port" suffix="TCP" value={network.httpsPort} min={1024} max={65535} onChange={(httpsPort) => patch({ httpsPort })} /></Group></SettingsCard>;
-}
+function NetworkPage({status}: PageProps & {onAllowUsb:(link:UsbLink)=>Promise<void>}) { return <SettingsCard title="Connexion Internet" subtitle="Votre PC et votre iPad peuvent utiliser des réseaux différents."><Group title="Record OS"><Row icon="globe" title="Relais sécurisé" subtitle="La connexion est chiffrée de bout en bout." value={status.relay.state === 'connected' ? 'Connecté' : 'Connexion en cours…'} /><Row icon="shield" title="Sans compte" subtitle="Chaque nouvel appareil doit être autorisé sur ce PC." /></Group></SettingsCard>; }
 
-function AdvancedPage({ settings, save }: PageProps) { const advanced = settings.advanced; const patch = (value: Partial<Settings['advanced']>) => void save({ ...settings, advanced: { ...advanced, ...value } }); return <SettingsCard title="Advanced" subtitle="These controls can affect availability and troubleshooting. Secure defaults are recommended."><Group title="Startup"><Row title="Start service with Vision-Pro" accessory={<Switch label="Start service on launch" checked={advanced.startServiceOnLaunch} onChange={(startServiceOnLaunch) => patch({ startServiceOnLaunch })} />} /><Row title="Launch at Windows sign-in" accessory={<Switch label="Launch at sign-in" checked={advanced.launchAtLogin} onChange={(launchAtLogin) => patch({ launchAtLogin })} />} /></Group><Group title="Diagnostics"><Row title="Verbose local logging" accessory={<Switch label="Verbose local logging" checked={advanced.verboseLogging} onChange={(verboseLogging) => patch({ verboseLogging })} />} /><Row title="Developer loopback endpoint" subtitle="127.0.0.1 only; disabled in normal use" accessory={<Switch label="Developer loopback" checked={advanced.developerLoopback} onChange={(developerLoopback) => patch({ developerLoopback })} />} /></Group></SettingsCard>; }
+function AdvancedPage({ settings, save }: PageProps) { const advanced = settings.advanced; const patch = (value: Partial<Settings['advanced']>) => void save({ ...settings, advanced: { ...advanced, ...value } }); return <SettingsCard title="Advanced" subtitle="These controls can affect availability and troubleshooting. Secure defaults are recommended."><Group title="Startup"><Row title="Start service with Record OS" accessory={<Switch label="Start service on launch" checked={advanced.startServiceOnLaunch} onChange={(startServiceOnLaunch) => patch({ startServiceOnLaunch })} />} /><Row title="Launch at Windows sign-in" accessory={<Switch label="Launch at sign-in" checked={advanced.launchAtLogin} onChange={(launchAtLogin) => patch({ launchAtLogin })} />} /></Group><Group title="Diagnostics"><Row title="Verbose local logging" accessory={<Switch label="Verbose local logging" checked={advanced.verboseLogging} onChange={(verboseLogging) => patch({ verboseLogging })} />} /><Row title="Developer loopback endpoint" subtitle="127.0.0.1 only; disabled in normal use" accessory={<Switch label="Developer loopback" checked={advanced.developerLoopback} onChange={(developerLoopback) => patch({ developerLoopback })} />} /></Group></SettingsCard>; }
 
-function About({ status }: { status: AgentStatus }) { return <SettingsCard title="Vision-Pro" subtitle="Your computer. Everywhere."><div className="about-mark"><Icon name="devices" size={44} /><h2>Vision-Pro</h2><p>Development code name · Version {status.version}</p></div><Group title="This PC"><Row title="Agent ID" value={<span className="mono">{status.agentId}</span>} /><Row title="Identity fingerprint" value={<span className="mono">{status.fingerprint}</span>} /><Row title="Empreinte pour connexion Internet" value={<span className="mono" style={{ overflowWrap: 'anywhere', userSelect: 'all' }}>{status.fullFingerprint ?? 'Mettez à jour Vision-Pro'}</span>} /><Row title="Local hostname" value={status.hostname} /></Group><p className="about-note">L’iPad sert de tablette graphique et de trackpad : rien n’est capturé ni diffusé depuis ce PC. Les commandes arrivent par une connexion chiffrée de bout en bout, directement sur le réseau local, par Tailscale ou par câble.</p></SettingsCard>; }
+function About({ status }: { status: AgentStatus }) { return <SettingsCard title="Record OS" subtitle="Your computer. Everywhere."><div className="about-mark"><Icon name="devices" size={44} /><h2>Record OS</h2><p>Development code name · Version {status.version}</p></div><Group title="This PC"><Row title="Agent ID" value={<span className="mono">{status.agentId}</span>} /><Row title="Identity fingerprint" value={<span className="mono">{status.fingerprint}</span>} /><Row title="Empreinte pour connexion Internet" value={<span className="mono" style={{ overflowWrap: 'anywhere', userSelect: 'all' }}>{status.fullFingerprint ?? 'Mettez à jour Record OS'}</span>} /></Group><p className="about-note">L’iPad sert de tablette graphique et de trackpad : rien n’est capturé ni diffusé depuis ce PC. Les commandes arrivent par une connexion chiffrée de bout en bout, par Internet via le relais Record OS.</p></SettingsCard>; }
 
 type PageProps = { status: AgentStatus; settings: Settings; save: (settings: Settings) => Promise<void> };
 function SettingsCard({ title, subtitle, children }: { title: string; subtitle: string; children: React.ReactNode }) { return <section className="settings-layout"><div className="settings-intro"><h2>{title}</h2><p>{subtitle}</p></div><div className="settings-body">{children}</div></section>; }
@@ -258,28 +209,3 @@ function CardTitle({ title, subtitle, action }: { title: string; subtitle: strin
 function Empty({ icon, title, text }: { icon: IconName; title: string; text: string }) { return <div className="desktop-empty large"><Icon name={icon} size={38} /><h2>{title}</h2><p>{text}</p></div>; }
 
 function PairingBanner({ request, onRespond }: { request: AgentStatus['pendingPairing'] & {}; onRespond: (approve: boolean) => Promise<void> }) { return <div className="pairing-banner"><div className="pairing-device"><span><Icon name="tablet" /></span><div><p>Connection request</p><h2>{request.deviceName}</h2><small>{request.deviceKind} · {request.ip} · {request.method}</small></div></div><div className="pairing-code"><small>VERIFY CODE</small><b>{request.sas}</b></div><div className="pairing-actions"><Button variant="danger" onClick={() => void onRespond(false)}>Decline</Button><Button variant="primary" onClick={() => void onRespond(true)}>Allow</Button></div></div>; }
-
-const networkLabel: Record<ConnectAddress['network'], { title: string; hint: string }> = {
-  lan: { title: 'Sur le même Wi-Fi', hint: 'iPad et PC sur le même réseau' },
-  tailscale: { title: 'Depuis n’importe où (Tailscale)', hint: 'iPad connecté à Tailscale' },
-};
-
-function ConnectDialog({ info, paired, onRefresh, onClose }: { info: ConnectInfo; paired?: Device; onRefresh: () => Promise<void>; onClose: () => void }) {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => { const timer = window.setInterval(() => setNow(Date.now()), 1000); return () => window.clearInterval(timer); }, []);
-  const remaining = info.expiresAt - now;
-  const code = `${info.code.slice(0, 3)} ${info.code.slice(3)}`;
-  return <div className="dialog-scrim"><section className="connect-dialog" role="dialog" aria-modal="true" aria-labelledby="connect-title">
-    <div className="connect-head"><div><p className="eyebrow">Association sécurisée</p><h2 id="connect-title">Connecter un iPad</h2></div><IconButton icon="close" label="Close" onClick={onClose} /></div>
-    {paired && <div className="connect-success"><Icon name="check" /><span><b>{paired.name}</b> est associé. Vous pouvez fermer cette fenêtre, ou associer un autre iPad avec le nouveau code.</span></div>}
-    <ol className="connect-steps">
-      <li><span className="step-n">1</span><div><b>Sur l’iPad, ouvrez Safari et tapez cette adresse</b>
-        {info.addresses.length ? <div className="connect-addresses">{info.addresses.map((address) => <div key={address.url} className="connect-address"><small>{networkLabel[address.network].title}</small><code>{address.url}</code><span>{networkLabel[address.network].hint}</span></div>)}</div>
-          : <p className="connect-warning">Aucune adresse réseau : connectez ce PC au Wi-Fi (ou à Tailscale).</p>}
-        <small className="connect-note">La première fois, la page fait installer le profil de sécurité de ce PC, puis ouvre Vision-Pro toute seule.</small></div></li>
-      <li><span className="step-n">2</span><div><b>Entrez ce code</b><div className="pair-code" aria-label={`Code ${info.code}`}><b>{code}</b><span>{remaining > 0 ? `expire dans ${formatDuration(remaining)}` : 'code expiré'}</span></div></div></li>
-    </ol>
-    <div className="connect-actions"><Button icon="refresh" onClick={() => void onRefresh()}>Nouveau code</Button></div>
-    <div className="trust-note"><Icon name="shield" /><span><b>Le code est l’autorisation.</b> Seul un iPad qui le saisit est associé ; un code ne sert qu’une fois et en remplace un autre après cinq erreurs.</span></div>
-  </section></div>;
-}

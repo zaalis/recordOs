@@ -1,0 +1,102 @@
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Installation de Record OS" Width="900" Height="640" MinWidth="900" MinHeight="640"
+        WindowStartupLocation="CenterScreen" ResizeMode="CanMinimize" Background="#FFFFFF"
+        FontFamily="Segoe UI" FontSize="14" Foreground="#1D1D1F" UseLayoutRounding="True">
+  <Window.Resources>
+    <Style TargetType="Button">
+      <Setter Property="Cursor" Value="Hand"/><Setter Property="MinHeight" Value="44"/>
+      <Setter Property="Padding" Value="24,10"/><Setter Property="Background" Value="#0071E3"/>
+      <Setter Property="Foreground" Value="White"/><Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="FontSize" Value="14"/><Setter Property="FontWeight" Value="SemiBold"/>
+      <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button">
+        <Border x:Name="Shell" CornerRadius="10" Background="{TemplateBinding Background}" Padding="{TemplateBinding Padding}">
+          <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+        </Border>
+        <ControlTemplate.Triggers>
+          <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Shell" Property="Opacity" Value="0.86"/></Trigger>
+          <Trigger Property="IsPressed" Value="True"><Setter TargetName="Shell" Property="Opacity" Value="0.7"/></Trigger>
+          <Trigger Property="IsEnabled" Value="False"><Setter TargetName="Shell" Property="Opacity" Value="0.4"/></Trigger>
+          <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="Shell" Property="BorderBrush" Value="#1D1D1F"/><Setter TargetName="Shell" Property="BorderThickness" Value="2"/></Trigger>
+        </ControlTemplate.Triggers>
+      </ControlTemplate></Setter.Value></Setter>
+    </Style>
+    <Style x:Key="Quiet" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+      <Setter Property="Background" Value="#F0F0F2"/><Setter Property="Foreground" Value="#353538"/>
+    </Style>
+  </Window.Resources>
+  <Grid Background="#FFFFFF">
+    <Grid.ColumnDefinitions><ColumnDefinition Width="238"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+    <Border Background="#F5F5F7" BorderBrush="#E8E8ED" BorderThickness="0,0,1,0">
+      <Grid Margin="28,34,24,26">
+        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+        <StackPanel><Image x:Name="BrandLogo" Width="56" Height="56" HorizontalAlignment="Left" Margin="0,0,0,16"/>
+          <TextBlock Text="Record OS" FontSize="25" FontWeight="SemiBold"/>
+          <TextBlock x:Name="VersionLabel" Foreground="#696970" FontSize="12" Margin="0,7,0,0"/>
+        </StackPanel>
+        <StackPanel Grid.Row="1" VerticalAlignment="Center" Margin="0,20,0,0">
+          <TextBlock Text="INSTALLATION" FontSize="10" FontWeight="SemiBold" Foreground="#77777E" Margin="0,0,0,25"/>
+          <TextBlock x:Name="Step1" Text="01    Bienvenue" FontWeight="SemiBold" Margin="0,0,0,26"/>
+          <TextBlock x:Name="Step2" Text="02    Installation" Foreground="#77777E" Margin="0,0,0,26"/>
+          <TextBlock x:Name="Step3" Text="03    C’est prêt" Foreground="#77777E"/>
+        </StackPanel>
+        <StackPanel Grid.Row="2"><TextBlock Text="Pensé pour votre iPad." Foreground="#696970" FontSize="12"/>
+          <TextBlock Text="Windows 10 / 11 · 64 bits" Foreground="#696970" FontSize="11" Margin="0,7,0,0"/>
+        </StackPanel>
+      </Grid>
+    </Border>
+    <Grid Grid.Column="1" Margin="42,37,42,26">
+      <Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+      <Grid x:Name="Welcome">
+        <StackPanel>
+          <TextBlock Text="BIENVENUE DANS RECORD OS" Foreground="#696970" FontWeight="SemiBold" FontSize="10" Margin="0,0,0,20"/>
+          <TextBlock Text="Votre PC.&#x0a;À portée de main." FontSize="38" FontWeight="SemiBold" LineHeight="45"/>
+          <TextBlock Text="Retrouvez la précision de votre iPad et de votre Apple Pencil sur votre PC." TextWrapping="Wrap" Foreground="#626269" FontSize="15" LineHeight="23" Margin="0,18,0,24" MaxWidth="440" HorizontalAlignment="Left"/>
+          <Border Background="#F5F5F7" CornerRadius="14" Padding="20,18">
+            <StackPanel>
+              <TextBlock Text="Simple dès la première connexion." FontWeight="SemiBold" FontSize="14"/>
+              <TextBlock Text="Un code sur l’iPad. Votre accord sur le PC." Foreground="#626269" Margin="0,6,0,0"/>
+              <Border Height="1" Background="#E1E1E6" Margin="0,15,0,15"/>
+              <TextBlock Text="Vos appareils, en confiance." FontWeight="SemiBold" FontSize="14"/>
+              <TextBlock Text="Sans compte. Connexion chiffrée de bout en bout." Foreground="#626269" TextWrapping="Wrap" Margin="0,6,0,0"/>
+            </StackPanel>
+          </Border>
+          <TextBlock x:Name="UpgradeNote" Text="Installation pour votre session Windows." Foreground="#626269" FontSize="12" Margin="0,18,0,0" TextWrapping="Wrap"/>
+        </StackPanel>
+      </Grid>
+      <StackPanel x:Name="Options" Visibility="Collapsed">
+        <TextBlock Text="À VOTRE CONVENANCE" FontSize="10" FontWeight="SemiBold" Foreground="#696970" Margin="0,0,0,20"/>
+        <TextBlock Text="Tout est à sa place." FontSize="32" FontWeight="SemiBold"/>
+        <TextBlock Text="L’application s’installe pour votre session Windows. Vos appareils associés et vos réglages sont conservés." TextWrapping="Wrap" Foreground="#626269" FontSize="15" LineHeight="23" Margin="0,18,0,28"/>
+        <TextBlock Text="EMPLACEMENT DE L’APPLICATION" FontSize="10" FontWeight="SemiBold" Foreground="#696970"/>
+        <Border Background="#F5F5F7" CornerRadius="12" Padding="16" Margin="0,12,0,14"><TextBlock x:Name="Location" TextWrapping="Wrap" FontSize="13"/></Border>
+        <Button x:Name="ChooseFolder" Content="Choisir un dossier…" Style="{StaticResource Quiet}" HorizontalAlignment="Left"/>
+        <TextBlock Text="Un raccourci sera ajouté sur le Bureau et dans le menu Démarrer." Foreground="#626269" FontSize="13" LineHeight="21" TextWrapping="Wrap" Margin="0,28,0,0"/>
+      </StackPanel>
+      <StackPanel x:Name="Installing" Visibility="Collapsed" VerticalAlignment="Center">
+        <TextBlock Text="Un instant,&#x0a;on prépare tout." FontSize="36" FontWeight="SemiBold"/>
+        <TextBlock x:Name="ProgressText" Text="Installation de Record OS…" Foreground="#626269" FontSize="15" TextWrapping="Wrap" LineHeight="23" Margin="0,20,0,28"/>
+        <ProgressBar x:Name="Progress" Height="5" IsIndeterminate="True" Foreground="#0071E3" Background="#E8E8ED" BorderThickness="0"/>
+        <TextBlock Text="Vous pourrez ensuite connecter votre iPad avec le code affiché sur le PC." TextWrapping="Wrap" Foreground="#626269" FontSize="13" LineHeight="21" Margin="0,26,0,0"/>
+      </StackPanel>
+      <StackPanel x:Name="Finished" Visibility="Collapsed" VerticalAlignment="Center">
+        <Border Width="60" Height="60" CornerRadius="30" Background="#E9F6ED" HorizontalAlignment="Left" Margin="0,0,0,24">
+          <Path Data="M 17,30 L 26,39 L 44,21" Stroke="#238344" StrokeThickness="3" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
+        </Border>
+        <TextBlock Text="Tout commence ici." FontSize="34" FontWeight="SemiBold"/>
+        <TextBlock Text="Record OS est installé. Ouvrez l’application, puis choisissez « Connecter un iPad »." TextWrapping="Wrap" Foreground="#626269" FontSize="15" LineHeight="24" Margin="0,18,0,0"/>
+      </StackPanel>
+      <StackPanel x:Name="Error" Visibility="Collapsed" VerticalAlignment="Center">
+        <TextBlock Text="Un point à vérifier." FontSize="32" FontWeight="SemiBold"/>
+        <TextBlock x:Name="ErrorText" Foreground="#626269" TextWrapping="Wrap" FontSize="15" LineHeight="24" Margin="0,20,0,0"/>
+      </StackPanel>
+      <StackPanel Grid.Row="1">
+        <Border Height="1" Background="#E8E8ED" Margin="0,16,0,18"/>
+        <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+          <Button x:Name="Secondary" Content="Personnaliser" Style="{StaticResource Quiet}" HorizontalAlignment="Left" Padding="16,10"/>
+          <Button x:Name="Primary" Grid.Column="1" Content="Installer Record OS" IsDefault="True" MinWidth="176"/>
+        </Grid>
+      </StackPanel>
+    </Grid>
+  </Grid>
+</Window>

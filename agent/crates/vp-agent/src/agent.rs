@@ -104,7 +104,7 @@ pub enum ConnectNetwork {
 }
 
 /// An address to type on the iPad. It opens the setup page, which installs this PC's trust
-/// profile the first time and then continues to the Vision-Pro app.
+/// profile the first time and then continues to the Record OS app.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectAddress {
@@ -304,7 +304,7 @@ impl Agent {
                 self.core.audit.record(
                     Severity::Info,
                     "service.started",
-                    "Vision-Pro service started.",
+                    "Record OS service started.",
                 );
                 let _ = self.core.events.send(AgentEvent::ServiceChanged {
                     running: true,
@@ -343,7 +343,7 @@ impl Agent {
             self.core.audit.record(
                 Severity::Info,
                 "service.stopped",
-                "Vision-Pro service stopped.",
+                "Record OS service stopped.",
             );
             let _ = self.core.events.send(AgentEvent::ServiceChanged {
                 running: false,
@@ -413,7 +413,7 @@ impl Agent {
         Some(connected)
     }
 
-    /// Makes the cable network private and allows Vision-Pro on it (asks for UAC consent).
+    /// Makes the cable network private and allows Record OS on it (asks for UAC consent).
     pub fn allow_usb_link(&self, id: &str) -> anyhow::Result<()> {
         let link = self
             .core
@@ -429,7 +429,7 @@ impl Agent {
             Severity::Notice,
             "usb.network-allowed",
             format!(
-                "La liaison USB « {} » est désormais un réseau privé autorisé pour Vision-Pro.",
+                "La liaison USB « {} » est désormais un réseau privé autorisé pour Record OS.",
                 link.alias
             ),
         );
@@ -447,7 +447,7 @@ impl Agent {
     pub fn open_connect_window(&self, refresh: bool) -> anyhow::Result<ConnectInfo> {
         anyhow::ensure!(
             self.is_running(),
-            "Start Vision-Pro before connecting a device."
+            "Start Record OS before connecting a device."
         );
         let previous = self.core.pairing.window().map(|w| w.code);
         let window = if refresh {
@@ -455,54 +455,19 @@ impl Agent {
         } else {
             self.core.pairing.open_window()
         };
-        let bootstrap_port = {
-            let mut bootstrap = self.bootstrap.lock();
-            if bootstrap.is_none() {
-                match self
-                    .runtime
-                    .block_on(server::start_bootstrap(self.core.clone()))
-                {
-                    Ok((handle, port)) => {
-                        if port != server::BOOTSTRAP_PORT {
-                            self.core.audit.record(
-                                Severity::Notice,
-                                "pair.bootstrap-fallback",
-                                format!(
-                                    "The pairing setup port was occupied; Vision-Pro is using alternate local port {port}."
-                                ),
-                            );
-                        }
-                        *bootstrap = Some((handle, port));
-                    }
-                    Err(error) => tracing::warn!(%error, "bootstrap listener unavailable"),
-                }
-            }
-            bootstrap.as_ref().map(|(_, port)| *port)
-        };
         let settings = self.core.settings.read().clone();
         let identity = self.core.identity.read().clone();
-        // Concrete addresses, not the mDNS `.local` hostname: some iPads resolve it to their own
-        // 127.0.0.1. The certificate covers every one of them.
-        let port = settings.network.https_port;
-        let lan = crate::net::primary_lan_ip().map(|ip| (ConnectNetwork::Lan, ip));
-        let tailscale = crate::net::overlay_addresses()
-            .into_iter()
-            .next()
-            .map(|ip| (ConnectNetwork::Tailscale, ip));
-        let addresses = lan
-            .into_iter()
-            .chain(tailscale)
-            .map(|(network, ip)| {
-                let app_url = format!("https://{ip}:{port}/");
-                ConnectAddress {
-                    network,
-                    url: bootstrap_port
-                        .map(|setup| format!("http://{ip}:{setup}"))
-                        .unwrap_or_else(|| app_url.clone()),
-                    app_url,
-                }
-            })
-            .collect();
+        let url = settings
+            .network
+            .relay_url
+            .as_deref()
+            .unwrap_or("wss://vision-pro.34-73-186-88.sslip.io")
+            .replacen("wss://", "https://", 1);
+        let addresses = vec![ConnectAddress {
+            network: ConnectNetwork::Lan,
+            url: url.clone(),
+            app_url: url,
+        }];
         if previous.as_deref() != Some(window.code.as_str()) {
             let _ = self.core.events.send(AgentEvent::ConnectWindowChanged);
         }

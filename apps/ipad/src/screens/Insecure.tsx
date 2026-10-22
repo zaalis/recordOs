@@ -16,7 +16,7 @@ export function Insecure() {
             Secure connection required
           </h1>
           <p className="hero-subtitle" style={{ marginTop: 0 }}>
-            Vision-Pro fonctionne uniquement par une connexion chiffrée, pour que le PC et cet iPad se vérifient. Ouvrez l’adresse affichée par « Connecter un appareil » sur le PC.
+            Record OS fonctionne uniquement par une connexion chiffrée, pour que le PC et cet iPad se vérifient. Ouvrez l’adresse affichée par « Connecter un appareil » sur le PC.
           </p>
           <div>
             <Button variant="primary" size="lg" onClick={() => (location.href = secureUrl)}>

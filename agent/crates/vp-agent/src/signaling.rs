@@ -437,44 +437,9 @@ async fn session<T: SignalTransport>(
                 };
                 return Err(ctx.fail(code, None).await);
             }
-            let persisted = core.sessions.with_current_authorization(
-                &init.device_id,
-                authorization_epoch,
-                || {
-                    let mut devices = core.devices.write();
-                    devices.insert_paired(
-                        &init.device_id,
-                        &device_name,
-                        &init.device_kind,
-                        &device_pub,
-                        "code",
-                        &ip.to_string(),
-                    );
-                    if let Err(error) = devices.save(&identity) {
-                        tracing::error!(%error, "failed to persist device store");
-                    }
-                },
-            );
-            if persisted.is_none() {
-                return Err(Abort::Closed);
-            }
             core.pairing.consume_code();
-            core.audit
-                .record(
-                    Severity::Notice,
-                    "pair.approved",
-                    format!("{device_name} is now a trusted device (code)."),
-                )
-                .ip(ip)
-                .device(&init.device_id, &device_name);
-            let _ = core.events.send(AgentEvent::DevicesChanged);
             let _ = core.events.send(AgentEvent::ConnectWindowChanged);
-            send_secure(
-                ctx.transport,
-                &mut channel,
-                json!({ "t": "pair.result", "approved": true }),
-            )
-            .await?;
+            needs_approval = Some("code");
         }
         _ => {
             ctx.penalize("invalid mode");
@@ -588,12 +553,27 @@ async fn session<T: SignalTransport>(
             core.sessions
                 .with_current_authorization(&init.device_id, authorization_epoch, || {
                     let mut devices = core.devices.write();
-                    devices.set_trusted(&init.device_id);
+                    let before = devices.clone();
+                    if devices.get(&init.device_id).is_none() {
+                        devices.insert_paired(
+                            &init.device_id,
+                            &device_name,
+                            &init.device_kind,
+                            &device_pub,
+                            "code",
+                            &ip.to_string(),
+                        );
+                    } else {
+                        devices.set_trusted(&init.device_id);
+                    }
                     if let Err(error) = devices.save(&identity) {
                         tracing::error!(%error, "failed to persist device store");
+                        *devices = before;
+                        return false;
                     }
+                    true
                 });
-        if persisted.is_none() {
+        if persisted != Some(true) {
             return Err(Abort::Closed);
         }
         core.audit

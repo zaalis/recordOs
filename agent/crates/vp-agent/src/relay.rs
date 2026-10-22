@@ -1,4 +1,4 @@
-//! Remote Access: an outbound, authenticated connection from this PC to a Vision-Pro relay
+//! Remote Access: an outbound, authenticated connection from this PC to a Record OS relay
 //! (agent/crates/vp-relay, docs/RELAY.md).
 //!
 //! - The PC proves its identity by signing the relay's challenge with the agent key.
@@ -206,7 +206,7 @@ fn describe_connect_error(error: &anyhow::Error) -> String {
     } else if text.contains("délai") {
         "Le relais ne répond pas.".into()
     } else if text.contains("404") || text.contains("HTTP error") {
-        "Cette adresse n’est pas un relais Vision-Pro.".into()
+        "Cette adresse n’est pas un relais Record OS.".into()
     } else {
         "Impossible de joindre le relais.".into()
     }
@@ -294,7 +294,7 @@ async fn session(
         .as_str()
         .and_then(|n| from_b64u(n, Some(32)))
         .filter(|_| challenge["t"] == "challenge")
-        .ok_or_else(|| "Cette adresse n’est pas un relais Vision-Pro compatible.".to_string())?;
+        .ok_or_else(|| "Cette adresse n’est pas un relais Record OS compatible.".to_string())?;
     let identity = core.identity.read().clone();
     let mut register = json!({
         "t": "register",
@@ -333,13 +333,20 @@ async fn session(
         "This PC is reachable through the Remote Access relay.",
     );
 
+    let mut pairing_tick = tokio::time::interval(Duration::from_secs(1));
     let result = loop {
         tokio::select! {
+            _ = pairing_tick.tick() => {
+                let window = core.pairing.window();
+                let message = match window { Some(w) => serde_json::json!({"t":"pair.publish","code":w.code,"expires":w.expires_at_ms / 1000}), None => serde_json::json!({"t":"pair.publish","code":"","expires":0}) };
+                if sink.send(Message::Text(message.to_string().into())).await.is_err() { break Err("Relais déconnecté".into()); }
+            }
             incoming = timeout(CONTROL_IDLE, stream.next()) => {
                 match incoming {
                     Ok(Some(Ok(Message::Text(text)))) => {
                         let Ok(message) = serde_json::from_str::<Value>(&text) else { continue };
                         match message["t"].as_str() {
+                            Some("pair.collision") => { core.pairing.refresh_window(); let _ = core.events.send(crate::events::AgentEvent::ConnectWindowChanged); }
                             Some("incoming") => {
                                 if let Some(ticket) = message["ticket"].as_str().filter(|t| t.len() == 32 && t.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')) {
                                     let ip = message["ip"].as_str().and_then(|ip| ip.parse().ok()).unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));

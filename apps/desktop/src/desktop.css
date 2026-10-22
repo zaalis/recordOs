@@ -54,3 +54,4 @@ button { cursor: pointer; }
 .usb-copy p:not(.eyebrow) { margin: 0; color: var(--vp-text-2); font-size: 13px; line-height: 1.45; max-width: 620px; }
 .usb-copy small { color: var(--vp-text-3); }
 .sidebar-status .sidebar-usb { display: flex; align-items: center; gap: 5px; color: var(--vp-green); }
+.connect-dialog { max-height: calc(100dvh - 60px); overflow-y: auto; overscroll-behavior: contain; }.connect-decisions { display:flex; flex-wrap:wrap; gap:12px; }.connect-decisions button { min-height:44px; }.connect-confirm .connect-note { margin:0; }.pair-code .comparison-code { font-size:28px; }.connect-actions { gap:12px; }.connect-head button { min-width:44px; min-height:44px; }

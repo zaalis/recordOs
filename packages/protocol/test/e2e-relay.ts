@@ -10,7 +10,7 @@ import { SignalingClient, generateDeviceIdentity, relayConnectUrl, type ClientEv
 const RELAY = process.env.VP_RELAY ?? 'ws://127.0.0.1:18080';
 const AGENT_ID = process.env.VP_AGENT_ID ?? '';
 const CODE = process.env.VP_CODE ?? '';
-assert.ok(AGENT_ID.length === 22 && CODE.length === 6, 'VP_AGENT_ID and VP_CODE are required');
+assert.ok(AGENT_ID.length === 22 && CODE.length === 4, 'VP_AGENT_ID and VP_CODE are required');
 
 const URL = relayConnectUrl(RELAY, AGENT_ID)!;
 
@@ -58,7 +58,7 @@ let fingerprint = '';
   const { client, done } = run(identity, 'pair', { proof: { kind: 'code', secret: CODE } });
   const events = await done;
   console.log('pair with code:', kinds(events));
-  assert.deepEqual(kinds(events), ['hello', 'paired', 'ready']);
+  assert.deepEqual(kinds(events), ['hello', 'pairing', 'paired', 'ready']);
   const ready = events.at(-1) as Extract<ClientEvent, { type: 'ready' }>;
   assertRelayedSession(ready.session);
   const { fingerprintOf } = await import('../src/index.ts');

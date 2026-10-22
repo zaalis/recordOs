@@ -29,8 +29,8 @@ use windows::Win32::UI::Input::Pointer::{
     POINTER_FLAG_UP, POINTER_FLAG_UPDATE, POINTER_INFO, POINTER_PEN_INFO, POINTER_TOUCH_INFO,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetCursorPos, PEN_FLAG_BARREL, PEN_FLAG_ERASER, PEN_FLAG_INVERTED, PEN_MASK_PRESSURE,
-    PEN_MASK_ROTATION, PEN_MASK_TILT_X, PEN_MASK_TILT_Y, PT_PEN, PT_TOUCH, TOUCH_MASK_CONTACTAREA,
+    PEN_FLAG_BARREL, PEN_FLAG_ERASER, PEN_FLAG_INVERTED, PEN_MASK_PRESSURE, PEN_MASK_ROTATION,
+    PEN_MASK_TILT_X, PEN_MASK_TILT_Y, PT_PEN, PT_TOUCH, TOUCH_MASK_CONTACTAREA,
     TOUCH_MASK_PRESSURE, XBUTTON1, XBUTTON2,
 };
 
@@ -224,15 +224,8 @@ impl Injector {
                 }
                 self.rel_accum.0 -= ix as f64;
                 self.rel_accum.1 -= iy as f64;
-                let mut current = POINT::default();
-                unsafe {
-                    let _ = GetCursorPos(&mut current);
-                }
-                let target = POINT {
-                    x: (current.x + ix).clamp(rect.left, rect.right - 1),
-                    y: (current.y + iy).clamp(rect.top, rect.bottom - 1),
-                };
-                send(&[self.absolute_move(target)]);
+                // Native relative input respects applications which warp/recenter the cursor.
+                send(&[mouse_input(ix, iy, 0, MOUSEEVENTF_MOVE)]);
             }
             InputEvent::Button { button, down, at } if self.policy.mouse => {
                 let mut inputs = Vec::with_capacity(2);

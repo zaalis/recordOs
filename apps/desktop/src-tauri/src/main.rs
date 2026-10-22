@@ -15,8 +15,13 @@ fn json<T: serde::Serialize>(value: T) -> Result<serde_json::Value, String> {
 }
 
 #[tauri::command]
-fn get_status(agent: tauri::State<'_, SharedAgent>) -> Result<serde_json::Value, String> {
-    json(agent.status())
+fn get_status(
+    app: tauri::AppHandle,
+    agent: tauri::State<'_, SharedAgent>,
+) -> Result<serde_json::Value, String> {
+    let mut status = json(agent.status())?;
+    status["version"] = serde_json::json!(app.package_info().version.to_string());
+    Ok(status)
 }
 
 #[tauri::command]
@@ -126,7 +131,7 @@ fn unlock_sources(agent: tauri::State<'_, SharedAgent>) {
     agent.unlock_sources();
 }
 
-/// Asks Windows (UAC) to treat a tablet's cable network as private and allow Vision-Pro on it.
+/// Asks Windows (UAC) to treat a tablet's cable network as private and allow Record OS on it.
 #[tauri::command]
 async fn allow_usb_link(agent: tauri::State<'_, SharedAgent>, id: String) -> Result<(), String> {
     let agent = agent.inner().clone();
@@ -136,7 +141,7 @@ async fn allow_usb_link(agent: tauri::State<'_, SharedAgent>, id: String) -> Res
         .map_err(|error| error.to_string())
 }
 
-/// Sends the agent's tracing output to `agent.<date>.log` in the `logs` folder of the Vision-Pro
+/// Sends the agent's tracing output to `agent.<date>.log` in the `logs` folder of the Record OS
 /// data directory (last seven days). The release app has no console, so without a file everything
 /// it logs — encoder in use, stream statistics, warnings — is lost. Falls back to standard output
 /// if the folder cannot be written. The returned guard flushes the file on exit and must stay
@@ -193,7 +198,7 @@ fn main() {
             let agent = Arc::new(Agent::new(vp_agent::platform::control_engine())?);
             if agent.settings().advanced.start_service_on_launch {
                 if let Err(error) = agent.start_service() {
-                    eprintln!("Vision-Pro service did not start: {error}");
+                    eprintln!("Record OS service did not start: {error}");
                 }
             }
             let mut events = agent.subscribe();
@@ -233,7 +238,7 @@ fn main() {
             allow_usb_link,
         ])
         .build(tauri::generate_context!())
-        .expect("failed to build Vision-Pro");
+        .expect("failed to build Record OS");
 
     app.run(|handle, event| {
         if matches!(event, tauri::RunEvent::Exit) {

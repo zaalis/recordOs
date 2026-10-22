@@ -25,7 +25,24 @@ export type ControlMode = 'direct' | 'trackpad' | 'pencil';
 export type ThreeFingerAction = 'none' | 'task-view' | 'show-desktop' | 'switch-app' | 'desktops';
 export type PencilFingers = 'navigate' | 'ignore' | 'touch';
 
+export interface SurfaceStyle {
+  background: 'graphite' | 'midnight' | 'paper' | 'custom';
+  backgroundColor: string;
+  pattern: 'dots' | 'grid' | 'none';
+  patternColor: string;
+  patternOpacity: number;
+  patternSpacing: number;
+  trail: boolean;
+  trailColor: string;
+  trailSize: number;
+  trailDuration: number;
+}
+export const DEFAULT_SURFACE_STYLE: SurfaceStyle = {
+  background: 'graphite', backgroundColor: '#151518', pattern: 'dots', patternColor: '#dcdce0', patternOpacity: 0.19, patternSpacing: 13,
+  trail: false, trailColor: '#8ebaff', trailSize: 14, trailDuration: 600,
+};
 export interface Preferences {
+  surfaceStyle: SurfaceStyle;
   deviceName: string;
   onboarded: boolean;
   controlMode: ControlMode;
@@ -49,6 +66,7 @@ export interface Preferences {
 }
 
 export const DEFAULT_PREFERENCES: Preferences = {
+  surfaceStyle: { ...DEFAULT_SURFACE_STYLE },
   deviceName: 'iPad',
   onboarded: false,
   controlMode: 'direct',
@@ -127,7 +145,7 @@ export async function loadPreferences(): Promise<Preferences> {
 
 /** Complete preferences from what an earlier version stored. */
 export function preferencesFrom(stored: Partial<Preferences> | undefined): Preferences {
-  // Drop what earlier versions stored and no longer exists: the language (Vision-Pro is
+  // Drop what earlier versions stored and no longer exists: the language (Record OS is
   // French-only), the screen-streaming options (the iPad is a tablet surface only).
   const {
     language: _language,
@@ -142,6 +160,7 @@ export function preferencesFrom(stored: Partial<Preferences> | undefined): Prefe
   return {
     ...DEFAULT_PREFERENCES,
     ...saved,
+    surfaceStyle: normalizeSurfaceStyle(saved.surfaceStyle),
     toolbar: { ...DEFAULT_PREFERENCES.toolbar, ...saved.toolbar },
     // Session controls always disappear after five seconds. This migration
     // also fixes iPads where an older build persisted the option as disabled.
@@ -189,4 +208,19 @@ export async function resetEverything(onBlocked?: () => void): Promise<void> {
     request.onerror = () => reject(request.error);
     request.onblocked = () => onBlocked?.();
   });
+}
+
+export function normalizeSurfaceStyle(value?: Partial<SurfaceStyle>): SurfaceStyle {
+  const v = { ...DEFAULT_SURFACE_STYLE, ...value };
+  const color = (s: string, fallback: string) => /^#[0-9a-f]{6}$/i.test(s) ? s : fallback;
+  const range = (n: number, min: number, max: number, fallback: number) => Number.isFinite(n) ? Math.max(min, Math.min(max, n)) : fallback;
+  return { ...v,
+    background: ['graphite','midnight','paper','custom'].includes(v.background) ? v.background : 'graphite',
+    pattern: ['dots','grid','none'].includes(v.pattern) ? v.pattern : 'dots',
+    backgroundColor: color(v.backgroundColor, DEFAULT_SURFACE_STYLE.backgroundColor),
+    patternColor: color(v.patternColor, DEFAULT_SURFACE_STYLE.patternColor),
+    trailColor: color(v.trailColor, DEFAULT_SURFACE_STYLE.trailColor),
+    patternOpacity: range(v.patternOpacity, 0, 1, 0.19), patternSpacing: range(v.patternSpacing, 8, 48, 13),
+    trailSize: range(v.trailSize, 2, 40, 14), trailDuration: range(v.trailDuration, 100, 1500, 600), trail: v.trail === true,
+  };
 }

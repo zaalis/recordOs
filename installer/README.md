@@ -1,13 +1,7 @@
-# Vision-Pro — installation locale
+# Installation Record OS
 
-- Lancez `Vision-Pro_0.1.0_x64-setup.exe` pour installer ou mettre à jour Vision-Pro.
-- `vision-pro.exe` est le binaire portable correspondant à cette même version. Préférez l’installateur pour une installation normale.
+La version actuelle est **0.1.4** : [dossier Record-OS-0.1.4](Record-OS-0.1.4/README.md).
 
-Les réglages et appareils restent dans `%APPDATA%\\Vision-Pro`; ne supprimez pas ce dossier pour une simple mise à jour.
+Quittez l’application, puis lancez `Record-OS-0.1.4/Record-OS_0.1.4_x64-setup.exe`. L’installateur personnalisé conserve les réglages et les appareils associés de l’ancienne installation Vision-Pro. Rechargez ensuite l’interface sur l’iPad lorsqu’elle aura été mise à jour sur le serveur.
 
-## Empreintes SHA-256
-
-```text
-Vision-Pro_0.1.0_x64-setup.exe  F9FD3C02B2ACCC6AC55CE693605C581193D1B034FAE4E1F29AE075F2264FEE08
-vision-pro.exe                  410F028184B31D28F79C6EF3F9682FE11C8ED10F252A380B82C6D9E5331259DD
-```
+Les autres dossiers contiennent les anciennes versions conservées pour retour arrière. Ne lancez qu’une instance de l’application à la fois.

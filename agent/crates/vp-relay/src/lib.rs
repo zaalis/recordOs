@@ -48,6 +48,9 @@ pub struct Relay {
     pub connect_limiter: util::RateLimiter,
     /// Flips to `true` on shutdown; long-lived connections watch it and close.
     pub stopping: watch::Receiver<bool>,
+    pub invitations:
+        parking_lot::Mutex<std::collections::HashMap<String, (String, String, u64, u32)>>,
+    pub pairing_limiter: util::RateLimiter,
 }
 
 pub struct RunningRelay {
@@ -121,6 +124,8 @@ pub async fn start(config: RelayConfig) -> anyhow::Result<RunningRelay> {
     let (shutdown, rx) = watch::channel(false);
     let relay = Arc::new(Relay {
         hub: hub::Hub::new(udp.clone()),
+        invitations: Default::default(),
+        pairing_limiter: util::RateLimiter::new(5, 0.02),
         turn: turn::Turn::new(),
         turn_urls,
         turn_udp_port: turn_udp_addr.port(),

@@ -488,7 +488,7 @@ async fn static_handler(request: Request<Body>) -> Response<Body> {
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
                 [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-                "Vision-Pro web app is not built. Run `npm run build:web`.",
+                "Record OS web app is not built. Run `npm run build:web`.",
             )
                 .into_response();
         }
@@ -588,7 +588,7 @@ async fn bootstrap_profile(
         .header(header::CONTENT_TYPE, "application/x-apple-aspen-config")
         .header(
             header::CONTENT_DISPOSITION,
-            "attachment; filename=\"Vision-Pro.mobileconfig\"",
+            "attachment; filename=\"Record OS.mobileconfig\"",
         )
         .header(header::CACHE_CONTROL, "no-store")
         .body(Body::from(authority.mobileconfig(&name)))

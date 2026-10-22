@@ -2,7 +2,7 @@
   "name": "vision-pro",
   "private": true,
   "version": "0.1.0",
-  "description": "Vision-Pro — turn an iPad into an advanced remote interface for a Windows PC.",
+  "description": "Record OS — votre PC, à portée de main depuis votre iPad.",
   "workspaces": [
     "packages/*",
     "apps/*",
@@ -14,7 +14,7 @@
     "dev:server": "npm run dev -w @vision-pro/server",
     "build:web": "npm run build -w @vision-pro/ipad && npm run build -w @vision-pro/desktop",
     "build:server": "npm run build -w @vision-pro/server",
-    "package:installer": "node scripts/package-installer.mjs",
+    "package:installer": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-record-os-installer.ps1",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm run test --workspaces --if-present"
   },

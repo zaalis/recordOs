@@ -150,3 +150,26 @@ test('hover moves are coalesced and always precede the press that follows them',
   connection.signaling = undefined;
   connection.reset();
 });
+
+
+test('relative movement survives coalescing, and sequences remain monotonic across encoders', async () => {
+  const connection = new Connection(), sent = [];
+  connection.signaling = {open:true,bufferedAmount:0,send:async m=>{sent.push(m);},close(){}};
+  connection.update({phase:'connected'});
+  const relative = (x,y) => {const b=new ArrayBuffer(12),v=new DataView(b);v.setUint8(0,2);v.setFloat32(4,x,true);v.setFloat32(8,y,true);return b;};
+  connection.sendRealtime(relative(.1,.2));
+  for(let i=0;i<30;i++)connection.sendRealtime(relative(.01,.02));
+  connection.sendInput(new Uint8Array([10,0,0,0]).buffer);
+  await new Promise(r=>setTimeout(r,30));
+  const frames=sent.filter(m=>m.t==='rt'||m.t==='in').map(m=>new DataView(Uint8Array.from(Buffer.from(m.d,'base64url')).buffer));
+  let x=0,y=0;for(const v of frames){if(v.getUint8(0)===2){x+=v.getFloat32(4,true);y+=v.getFloat32(8,true);}}
+  assert.ok(Math.abs(x-.4)<.00001);assert.ok(Math.abs(y-.8)<.00001);
+  assert.deepEqual(frames.map(v=>v.getUint16(2,true)),frames.map((_,i)=>i));
+  assert.equal(frames.at(-1).getUint8(0),10,'release remains after all movement');connection.reset();
+});
+test('240 Hz movement burst is paced and coalesced rather than opening reconnects',async()=>{
+ const connection=new Connection(),sent=[];connection.signaling={open:true,bufferedAmount:0,send:async m=>{sent.push(m)},close(){}};connection.update({phase:'connected'});
+ const b=new ArrayBuffer(12);new DataView(b).setUint8(0,1);
+ for(let i=0;i<15;i++){for(let j=0;j<4;j++)connection.sendRealtime(b);await new Promise(r=>setTimeout(r,16));}
+ await new Promise(r=>setTimeout(r,30));assert.ok(sent.length<45);assert.equal(connection.getSnapshot().phase,'connected');assert.ok(connection.counters.coalesced>0);connection.reset();
+});

@@ -86,11 +86,11 @@ const ERROR_TEXT: Record<string, string> = {
   agent_mismatch: 'L’identité du PC ne correspond pas. La connexion a été arrêtée pour votre sécurité.',
   bad_signature: 'Le contrôle de sécurité a échoué. La connexion a été arrêtée.',
   commit_mismatch: 'Le contrôle de sécurité a échoué. La connexion a été arrêtée.',
-  version: 'Mettez à jour Vision-Pro sur le PC ou l’iPad.',
+  version: 'Mettez à jour Record OS sur le PC ou l’iPad.',
   not_local: 'Ce PC accepte uniquement les appareils de son réseau (ou de son réseau Tailscale).',
   protocol: 'La connexion a été interrompue.',
-  unreachable: 'Le PC ne répond pas. Vérifiez que Vision-Pro est ouvert sur le PC (ou que le câble USB et le Partage de connexion sont actifs), puis réessayez.',
-  offline: 'Ce PC n’est pas joignable par Internet. Vérifiez que Vision-Pro est ouvert et que l’accès à distance est activé sur le PC.',
+  unreachable: 'Le PC ne répond pas. Vérifiez que Record OS est ouvert sur le PC (ou que le câble USB et le Partage de connexion sont actifs), puis réessayez.',
+  offline: 'Ce PC n’est pas joignable par Internet. Vérifiez que Record OS est ouvert et que l’accès à distance est activé sur le PC.',
 };
 
 export function describeError(code: string): string {
@@ -123,6 +123,23 @@ export class Connection {
   private realtimePending: ArrayBuffer | null = null;
   private realtimeBusy = false;
   private realtimeTimer?: number;
+  private lastRealtimeAt = -Infinity;
+  private realtimeQueuedAt = 0;
+  private lastMeasuredStats: LiveStats = { ...EMPTY_STATS };
+  private lastMeasuredAt: number | null = null;
+  private inputSequence = 0;
+  private diagnosticEvents: { at: number; event: string; detail: string }[] = [];
+  readonly counters = { received: 0, sent: 0, coalesced: 0, sendFailures: 0, reconnects: 0 };
+  diagnostics() { return { lastStats: { ...this.lastMeasuredStats }, lastMeasuredAt: this.lastMeasuredAt, counters: { ...this.counters }, bufferedBytes: this.signaling?.bufferedAmount ?? 0, encryptionQueue: this.signaling?.pendingSends ?? 0, pendingMoves: this.realtimePending ? 1 : 0, pendingAgeMs: this.realtimePending ? Math.round(performance.now() - this.realtimeQueuedAt) : 0, events: [...this.diagnosticEvents] }; }
+  private recordDiagnostic(event: string, detail = '') {
+    this.diagnosticEvents.push({ at: Date.now(), event, detail: detail.slice(0, 120) });
+    if (this.diagnosticEvents.length > 100) this.diagnosticEvents.shift();
+  }
+  private inputData(buffer: ArrayBuffer): string {
+    const copy = buffer.slice(0);
+    if (copy.byteLength >= 4) new DataView(copy).setUint16(2, this.inputSequence++ & 0xffff, true);
+    return b64u(new Uint8Array(copy));
+  }
   onPaired?: (info: { agentId: string; name: string; fingerprint: string; relayUrl?: string; usbUrls: string[] }) => void;
   /**
    * Current cable endpoints of a PC. Given the endpoints already known, returns the ones to try
@@ -165,6 +182,8 @@ export class Connection {
 
   async connect(target: ConnectTarget, identity: DeviceIdentity, deviceName: string): Promise<void> {
     ++this.connectEpoch;
+    Object.assign(this.counters, { received: 0, sent: 0, coalesced: 0, sendFailures: 0, reconnects: 0 });
+    this.diagnosticEvents = [];
     this.teardown();
     this.closedByUser = false;
     this.target = target;
@@ -246,6 +265,8 @@ export class Connection {
           else this.fail(event.code);
           break;
         case 'closed':
+          if (event.code === 1008 && event.reason === 'rate_limited') { this.recordDiagnostic('rate_limited'); this.fail('rate_limited'); break; }
+          this.recordDiagnostic('socket.closed', `${event.code ?? ''}:${event.reason ?? ''}`);
           if (this.snapshot.switching) this.abortCableMove(url);
           else this.onSignalClosed();
           break;
@@ -341,7 +362,9 @@ export class Connection {
         if (sent !== undefined) {
           this.pings.delete(pong.id);
           const rtt = performance.now() - sent;
-          this.update({ stats: { pingMs: rtt, inputLatencyMs: rtt / 2 } });
+          this.lastMeasuredStats = { pingMs: rtt, inputLatencyMs: rtt / 2 };
+          this.lastMeasuredAt = Date.now();
+          this.update({ stats: this.lastMeasuredStats });
         }
         return;
       }
@@ -407,27 +430,63 @@ export class Connection {
     const signaling = this.signaling;
     if (!signaling?.open || this.snapshot.phase !== 'connected') return;
     // A socket closing during a tab switch rejects; the session's own close handling follows.
-    void signaling.send(message as unknown as { t: string } & Record<string, unknown>).catch(() => undefined);
+    void signaling.send(message as unknown as { t: string } & Record<string, unknown>).catch(() => { this.counters.sendFailures++; this.recordDiagnostic('send.failed'); });
   }
 
   /** Reliable, ordered input (clicks, keys, pen strokes). */
   sendInput(buffer: ArrayBuffer): void {
-    if (!this.snapshot.controlAllowed) return;
+    if (!this.snapshot.controlAllowed || !this.signaling?.open || this.snapshot.phase !== 'connected') return;
     // A hover move still waiting must reach the PC before the press that follows it. Messages
     // are encrypted and sent in call order, so queue it first.
     const hover = this.realtimePending;
     if (hover) {
       this.realtimePending = null;
-      this.sendControl({ t: 'rt', d: b64u(new Uint8Array(hover)) });
+      this.sendPendingBeforeBarrier(hover);
     }
-    this.sendControl({ t: 'in', d: b64u(new Uint8Array(buffer)) });
+    this.sendControl({ t: 'in', d: this.inputData(buffer) });
+    this.counters.sent++;
   }
 
   /** Latest-wins input (hover moves). Coalesced under congestion rather than queued. */
   sendRealtime(buffer: ArrayBuffer): void {
-    if (!this.snapshot.controlAllowed) return;
+    if (!this.snapshot.controlAllowed || !this.signaling?.open || this.snapshot.phase !== 'connected') return;
+    this.counters.received++;
+    const previous = this.realtimePending;
+    if (!previous) this.realtimeQueuedAt = performance.now();
+    if (previous) this.counters.coalesced++;
+    if (previous?.byteLength === 12 && buffer.byteLength === 12 && new Uint8Array(previous)[0] === 2 && new Uint8Array(buffer)[0] === 2) {
+      buffer = buffer.slice(0);
+      const a = new DataView(previous), b = new DataView(buffer);
+      b.setFloat32(4, a.getFloat32(4, true) + b.getFloat32(4, true), true);
+      b.setFloat32(8, a.getFloat32(8, true) + b.getFloat32(8, true), true);
+    } else if (previous && previous.byteLength >= 4 && buffer.byteLength >= 4 && new Uint8Array(previous)[0] !== new Uint8Array(buffer)[0]) {
+      this.sendPendingBeforeBarrier(previous);
+    }
     this.realtimePending = buffer;
     if (!this.realtimeBusy) this.flushRealtime();
+  }
+
+  private splitRelative(buffer: ArrayBuffer): [ArrayBuffer, ArrayBuffer | null] {
+    if (buffer.byteLength !== 12 || new Uint8Array(buffer)[0] !== 2) return [buffer, null];
+    const view = new DataView(buffer), dx = view.getFloat32(4, true), dy = view.getFloat32(8, true);
+    if (!Number.isFinite(dx) || !Number.isFinite(dy) || Math.abs(dx) > 1024 || Math.abs(dy) > 1024) {
+      this.recordDiagnostic('relative.invalid'); this.fail('protocol'); return [buffer, null];
+    }
+    const x = Math.max(-1, Math.min(1, dx)), y = Math.max(-1, Math.min(1, dy));
+    const part = buffer.slice(0), out = new DataView(part);
+    out.setFloat32(4, x, true); out.setFloat32(8, y, true);
+    if (Math.abs(dx - x) < 0.000001 && Math.abs(dy - y) < 0.000001) return [part, null];
+    const rest = buffer.slice(0), r = new DataView(rest);
+    r.setFloat32(4, dx - x, true); r.setFloat32(8, dy - y, true);
+    return [part, rest];
+  }
+  private sendPendingBeforeBarrier(buffer: ArrayBuffer): void {
+    let next: ArrayBuffer | null = buffer;
+    while (next) {
+      const [part, rest] = this.splitRelative(next);
+      this.sendControl({ t: 'rt', d: this.inputData(part) }); this.counters.sent++;
+      next = rest;
+    }
   }
 
   private flushRealtime(): void {
@@ -437,18 +496,23 @@ export class Connection {
       this.realtimePending = null;
       return;
     }
-    if (signaling.bufferedAmount > REALTIME_BACKLOG_BYTES) {
+    const remaining = 1000 / 120 - (performance.now() - this.lastRealtimeAt);
+    if (signaling.bufferedAmount > REALTIME_BACKLOG_BYTES || remaining > 0) {
       // The network is behind: keep only the newest move and look again shortly.
       window.clearTimeout(this.realtimeTimer);
-      this.realtimeTimer = window.setTimeout(() => this.flushRealtime(), 8);
+      this.realtimeTimer = window.setTimeout(() => this.flushRealtime(), Math.max(1, Math.ceil(remaining), 8));
       return;
     }
-    this.realtimePending = null;
+    const [part, rest] = this.splitRelative(next);
+    this.realtimePending = rest;
     this.realtimeBusy = true;
+    this.lastRealtimeAt = performance.now();
+    this.counters.sent++;
     void signaling
-      .send({ t: 'rt', d: b64u(new Uint8Array(next)) })
-      .catch(() => undefined)
+      .send({ t: 'rt', d: this.inputData(part) })
+      .catch(() => { this.counters.sendFailures++; this.recordDiagnostic('move.send_failed'); })
       .finally(() => {
+        if (this.signaling !== signaling) return;
         this.realtimeBusy = false;
         if (this.realtimePending && this.signaling === signaling) this.flushRealtime();
       });
@@ -495,6 +559,7 @@ export class Connection {
     // Losing the cable falls back to Wi-Fi within a second or two: no overlay for that first try.
     const silent = (quiet || fromCable) && this.snapshot.reconnectAttempt === 0;
     const attempt = this.snapshot.reconnectAttempt + 1;
+    this.counters.reconnects++; this.recordDiagnostic('reconnect', String(attempt));
     if (attempt > 8) {
       this.teardown();
       this.update({ phase: 'failed', error: describeError('protocol') });
@@ -586,3 +651,13 @@ export class Connection {
 }
 
 export const connection = new Connection();
+
+
+export function exportConnectionDiagnostics(): void {
+  const snapshot = connection.getSnapshot();
+  const blob = new Blob([JSON.stringify({ capturedAt: new Date().toISOString(), stats: snapshot.stats, link: snapshot.link, ...connection.diagnostics() }, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob), anchor = document.createElement('a');
+  anchor.href = url; anchor.download = 'record-os-diagnostic.json';
+  document.body.append(anchor); anchor.click(); anchor.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 10000);
+}

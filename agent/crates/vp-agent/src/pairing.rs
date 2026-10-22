@@ -1,4 +1,4 @@
-//! Pairing state: the "Connect Device" window (a 6-digit code shown on the PC) and the single
+//! Pairing state: the "Connect Device" window (a 4-digit code shown on the PC) and the single
 //! pending approval shown on the PC for devices that must be confirmed again.
 //!
 //! Discovery never implies authorization: a new device must prove it knows the code currently
@@ -12,7 +12,7 @@ use parking_lot::Mutex;
 use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
 
-pub const CONNECT_WINDOW_TTL: Duration = Duration::from_secs(5 * 60);
+pub const CONNECT_WINDOW_TTL: Duration = Duration::from_secs(2 * 60);
 const MAX_CODE_ATTEMPTS: u32 = 5;
 
 #[derive(Debug, Clone)]
@@ -124,8 +124,7 @@ impl PairingManager {
         }
         if window.code_attempts >= MAX_CODE_ATTEMPTS {
             // Burn the code; the PC shows a new one.
-            window.code = random_code();
-            window.code_attempts = 0;
+            window.code_attempts = MAX_CODE_ATTEMPTS;
             return Err(ProofError::CodeExhausted);
         }
         Err(ProofError::Invalid)
@@ -229,7 +228,7 @@ mod tests {
         );
         let old = crate::util::b64u(&crypto::pair_proof_mac(&window.code, &transcript));
         assert!(manager.verify_proof("code", &old, &transcript).is_err());
-        let fresh = manager.window().unwrap();
+        let fresh = manager.refresh_window();
         let good = crate::util::b64u(&crypto::pair_proof_mac(&fresh.code, &transcript));
         assert_eq!(
             manager.verify_proof("qr", &good, &transcript),

@@ -595,7 +595,7 @@ pub fn allow_link(link: &UsbLink) -> anyhow::Result<()> {
          Set-NetConnectionProfile -InterfaceIndex {index} -NetworkCategory Private; \
          Set-NetIPInterface -InterfaceIndex {index} -AddressFamily IPv4 -AutomaticMetric Disabled -InterfaceMetric 4000; \
          Remove-NetFirewallRule -Name '{rule}'; \
-         New-NetFirewallRule -Name '{rule}' -DisplayName 'Vision-Pro (USB)' -Description 'Liaison USB directe avec une tablette' \
+         New-NetFirewallRule -Name '{rule}' -DisplayName 'Record OS (USB)' -Description 'Liaison USB directe avec une tablette' \
            -Direction Inbound -Action Allow -Program '{exe}' -Profile Private,Public -InterfaceAlias '{alias}' | Out-Null",
         index = link.interface_index,
     );

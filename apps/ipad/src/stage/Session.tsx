@@ -12,11 +12,14 @@ import {
 } from '@vision-pro/protocol';
 import { Badge, Button, Group, Icon, IconButton, Row, Slider, Switch, formatMs, useToast } from '@vision-pro/design';
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
-import { connection } from '../lib/connection.ts';
+import { connection, exportConnectionDiagnostics } from '../lib/connection.ts';
 import { allProfiles, setScreen, updatePrefs, useApp } from '../lib/store.ts';
 import type { ControlMode, Preferences } from '../lib/storage.ts';
 import { isFullscreenActive, toggleFullscreen } from '../lib/platform.ts';
 import { InputController, type InputSource, type ThreeDNavigation } from './input-controller.ts';
+
+import { StyleSettings } from '../screens/StyleSettings.tsx';
+import { PointerTrail } from './PointerTrail.tsx';
 
 type Panel = 'displays' | 'control' | 'keyboard' | 'shortcuts' | 'settings' | null;
 type Ripple = { id: number; kind: 'tap' | 'right' | 'drag'; x: number; y: number };
@@ -122,12 +125,14 @@ export function Session() {
     return () => observer.disconnect();
   }, [contentRect]);
 
+  const inputContext = useRef({ contentRect, activity, sendCombo, prefs });
+  inputContext.current = { contentRect, activity, sendCombo, prefs };
   useEffect(() => {
     const surface = surfaceRef.current;
     if (!surface) return;
     const controller = new InputController(
       surface,
-      contentRect,
+      () => inputContext.current.contentRect(),
       { reliable: (buffer) => connection.sendInput(buffer), realtime: (buffer) => connection.sendRealtime(buffer) },
       prefs,
       {
@@ -137,9 +142,9 @@ export function Session() {
           setRipples((items) => [...items.slice(-4), { id, kind, x, y }]);
           window.setTimeout(() => setRipples((items) => items.filter((item) => item.id !== id)), 500);
         },
-        onUndo: () => sendCombo(['Ctrl', 'Z']),
-        onRedo: () => sendCombo(['Ctrl', 'Shift', 'Z']),
-        onActivity: activity,
+        onUndo: () => inputContext.current.sendCombo(['Ctrl', 'Z']),
+        onRedo: () => inputContext.current.sendCombo(['Ctrl', 'Shift', 'Z']),
+        onActivity: () => inputContext.current.activity(),
         modifiersForClick: () => undefined,
         onInputSource: setInputSource,
       },
@@ -150,7 +155,15 @@ export function Session() {
     controllerRef.current = controller;
     const detach = controller.attach();
     return () => { detach(); controllerRef.current = null; };
-  }, [activity, contentRect, prefs, sendCombo, snapshot.controlAllowed, threeDNavigation]);
+  }, [threeDNavigation]);
+  useEffect(() => {
+    const controller = controllerRef.current;
+    if (!controller) return;
+    if (controller.mode !== prefs.controlMode || !snapshot.controlAllowed) controller.releaseAll();
+    controller.mode = prefs.controlMode;
+    controller.enabled = snapshot.controlAllowed;
+    controller.setSettings(prefs);
+  }, [prefs, snapshot.controlAllowed]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -261,12 +274,17 @@ export function Session() {
     : toolbarPosition(prefs.toolbar.edge, prefs.toolbar.offset);
   const panelStyle = panelPosition(prefs.toolbar.edge);
 
+  const surfaceStyle = prefs.surfaceStyle;
+  const background = surfaceStyle.background === 'graphite' ? undefined : surfaceStyle.background === 'midnight' ? '#081323' : surfaceStyle.background === 'paper' ? '#ece9e2' : surfaceStyle.backgroundColor;
+  const ink = surfaceStyle.patternColor + Math.round(surfaceStyle.patternOpacity * 255).toString(16).padStart(2, '0');
+  const pattern = surfaceStyle.pattern === 'none' ? 'none' : surfaceStyle.pattern === 'grid' ? `linear-gradient(${ink} 1px, transparent 1px), linear-gradient(90deg, ${ink} 1px, transparent 1px)` : `radial-gradient(circle, ${ink} 0 0.65px, transparent 0.85px)`;
   return (
     <main className="stage" onPointerDown={activity}>
-      <div className="tablet-surface" aria-hidden="true" />
-      {area && <div className="tablet-area" aria-hidden="true" style={{ left: area.left, top: area.top, width: area.width, height: area.height }} />}
+      <div className="tablet-surface" aria-hidden="true" style={background ? { background } : undefined} />
+      {area && <div className="tablet-area" aria-hidden="true" style={{ left: area.left, top: area.top, width: area.width, height: area.height, backgroundImage: pattern, backgroundSize: `${surfaceStyle.patternSpacing}px ${surfaceStyle.patternSpacing}px` }} />}
       <div ref={surfaceRef} className="stage-surface" aria-label={`Surface de tablette graphique (${prefs.controlMode})`} />
 
+      <PointerTrail target={surfaceRef} style={surfaceStyle} />
       {ripples.map((ripple) => <span key={ripple.id} className="touch-ripple" data-kind={ripple.kind} style={{ left: ripple.x, top: ripple.y }} />)}
 
       {!interfaceHidden && <div className="input-source-indicator vp-glass" aria-live="polite"><Icon name={inputSource === 'pencil' ? 'pencil' : inputSource === 'pointer' ? 'trackpad' : 'touch'} size={16} /><span>{threeDNavigation !== 'none' ? activeProfile.name : display?.name ?? 'Windows'}</span><span aria-hidden="true">·</span><span>{inputSource === 'pencil' ? 'Apple Pencil' : inputSource === 'pointer' ? 'Trackpad ou souris' : 'Doigts'}</span></div>}
@@ -290,7 +308,7 @@ export function Session() {
           <ToolbarButton icon="collapse" label="Hide controls" onClick={() => { window.clearTimeout(activityTimer.current); setPanel(null); setIdle(true); setInterfaceHidden(true); }} />
         </nav>
       )}
-      {interfaceHidden && <button className="toolbar-reveal-zone" aria-label="Afficher les commandes de session" style={toolbarStyle} onPointerDown={(event) => { event.stopPropagation(); revealControls(); }} />}
+      {interfaceHidden && <button className="toolbar-reveal-zone" aria-label="Afficher les commandes de session" style={toolbarStyle} onPointerDown={(event) => { event.preventDefault(); event.stopPropagation(); }} onClick={(event) => { event.stopPropagation(); revealControls(); }} />}
 
       <input
         ref={hiddenInputRef}
@@ -393,14 +411,16 @@ function linkLabel(state: ReturnType<typeof connection.getSnapshot>): string {
 function SessionSettings({ prefs, state }: { prefs: Preferences; state: ReturnType<typeof connection.getSnapshot> }) {
   return <>
     <Group title="Interface"><Row icon="stats" title="Latence affichée" accessory={<Switch label="Latence affichée" checked={prefs.showStats} onChange={(showStats) => updatePrefs({ showStats })} />} /><Row icon="collapse" title="Commandes masquées après 5 secondes" value="Activé" /><Row icon="fullscreen" title="Plein écran" onClick={() => void toggleFullscreen()} chevron /></Group>
-    <Group title="Connexion"><Row icon="shield" title="Chiffrement" value="TLS + bout en bout" /><Row icon={state.link === 'usb' ? 'cable' : 'network'} title="Chemin" value={linkLabel(state)} /><Row icon="gauge" title="Latence" value={formatMs(state.stats.inputLatencyMs)} /><Row icon="clock" title="Session" value={state.session?.expiresAt ? `jusqu’à ${new Date(state.session.expiresAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : 'Active'} /></Group>
+    <StyleSettings />
+    <Group title="Connexion"><Row icon="shield" title="Chiffrement" value="TLS + bout en bout" /><Row icon={state.link === 'usb' ? 'cable' : 'network'} title="Chemin" value={linkLabel(state)} /><Row icon="gauge" title="Aller estimé (RTT ÷ 2)" value={formatMs(state.stats.inputLatencyMs)} /><Row icon="clock" title="Session" value={state.session?.expiresAt ? `jusqu’à ${new Date(state.session.expiresAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : 'Active'} /></Group>
+    <Button variant="ghost" block onClick={exportConnectionDiagnostics}>Exporter le diagnostic de connexion</Button>
     <Button variant="danger" icon="power" block onClick={() => { connection.disconnect(); setScreen('home'); }}>Déconnecter</Button>
   </>;
 }
 
 function Stats({ state }: { state: ReturnType<typeof connection.getSnapshot> }) {
   const stats = state.stats;
-  return <aside className="stats-overlay" aria-label="Connection statistics"><div className="stats-title"><span className="vp-dot" data-tone="green" /> Live</div><dl><dt>Ping</dt><dd>{formatMs(stats.pingMs)}</dd><dt>Commandes</dt><dd>{formatMs(stats.inputLatencyMs)}</dd><dt>Chemin</dt><dd>{linkLabel(state)}</dd></dl></aside>;
+  return <aside className="stats-overlay" aria-label="Connection statistics"><div className="stats-title"><span className="vp-dot" data-tone="green" /> Live</div><dl><dt>Ping</dt><dd>{formatMs(stats.pingMs)}</dd><dt>Aller estimé</dt><dd>{formatMs(stats.inputLatencyMs)}</dd><dt>File réseau</dt><dd>{connection.diagnostics().bufferedBytes} octets</dd><dt>Reconnexions</dt><dd>{connection.counters.reconnects}</dd><dt>Chemin</dt><dd>{linkLabel(state)}</dd></dl></aside>;
 }
 
 function toolbarPosition(edge: Preferences['toolbar']['edge'], offset: number): React.CSSProperties {

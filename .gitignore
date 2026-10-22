@@ -14,3 +14,7 @@ coverage/
 
 # Built installers: regenerate with `npm run package:installer`
 installer/*.exe
+installer/**/*.exe
+
+# Local performance recordings
+diagnostics/

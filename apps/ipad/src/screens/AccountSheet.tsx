@@ -70,7 +70,7 @@ export function AccountSheet({ mode, onClose }: { mode: 'signin' | 'signup' | nu
       {config === null && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
           <p className="vp-caption" style={{ margin: 0, fontSize: 15, lineHeight: 1.5 }}>
-            Accounts are optional. Vision-Pro works completely on your local network: your iPad and PC connect directly and nothing passes through the cloud.
+            Accounts are optional. Record OS works completely on your local network: your iPad and PC connect directly and nothing passes through the cloud.
           </p>
           <Group title="An account adds">
             <Row icon="devices" title="All your PCs in one place" subtitle="Find and manage every computer" />
@@ -78,7 +78,7 @@ export function AccountSheet({ mode, onClose }: { mode: 'signin' | 'signup' | nu
             <Row icon="shield" title="Remote revocation" subtitle="Remove a lost iPad from anywhere" />
           </Group>
           <p className="vp-footnote" style={{ padding: 0 }}>
-            This page is served directly by your PC. To use an account, open Vision-Pro from your account server.
+            This page is served directly by your PC. To use an account, open Record OS from your account server.
           </p>
           <Button variant="primary" block onClick={onClose}>
             Continue without account
@@ -129,7 +129,7 @@ export function AccountSheet({ mode, onClose }: { mode: 'signin' | 'signup' | nu
           </Button>
           {config.registration && (
             <Button variant="ghost" size="sm" onClick={() => setTab(tab === 'signin' ? 'signup' : 'signin')}>
-              {tab === 'signin' ? 'New to Vision-Pro? Create an account' : 'Already have an account? Sign in'}
+              {tab === 'signin' ? 'New to Record OS? Create an account' : 'Already have an account? Sign in'}
             </Button>
           )}
         </form>

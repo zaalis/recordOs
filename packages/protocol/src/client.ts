@@ -23,7 +23,7 @@ export type ClientEvent =
   | { type: 'ready'; session: SessionReady; sas: string }
   | { type: 'message'; message: { t: string } & Record<string, unknown> }
   | { type: 'error'; code: HandshakeErrorCode | string; retryAfterMs?: number }
-  | { type: 'closed'; code?: number };
+  | { type: 'closed'; code?: number; reason?: string };
 
 export interface SignalingOptions {
   url: string;
@@ -42,6 +42,7 @@ type Listener = (event: ClientEvent) => void;
 
 export class SignalingClient {
   private socket?: WebSocket;
+  pendingSends = 0;
   private handshakeTimer?: ReturnType<typeof setTimeout>;
   private handshake: ClientHandshake;
   private channel?: SecureChannel;
@@ -108,7 +109,7 @@ export class SignalingClient {
       this.clearHandshakeTimer();
       if (this.stage !== 'closed') {
         this.stage = 'closed';
-        this.emit({ type: 'closed', code: event.code });
+        this.emit({ type: 'closed', code: event.code, reason: event.reason });
       }
     };
     socket.onerror = () => {
@@ -132,9 +133,12 @@ export class SignalingClient {
 
   async send(message: { t: string } & Record<string, unknown>): Promise<void> {
     if (!this.channel || this.stage !== 'secure') throw new Error('channel not ready');
-    const frames = await this.channel.seal(message);
-    if (this.socket?.readyState !== 1) throw new Error('signaling socket closed');
-    for (const frame of frames) this.socket.send(JSON.stringify(frame));
+    this.pendingSends++;
+    try {
+      const frames = await this.channel.seal(message);
+      if (this.socket?.readyState !== 1) throw new Error('signaling socket closed');
+      for (const frame of frames) this.socket.send(JSON.stringify(frame));
+    } finally { this.pendingSends--; }
   }
 
   close(): void {

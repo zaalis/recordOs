@@ -40,12 +40,12 @@ pub struct NetworkSettings {
 impl Default for NetworkSettings {
     fn default() -> Self {
         Self {
-            mode: NetworkMode::LocalOnly,
+            mode: NetworkMode::RemoteAccess,
             https_port: 47800,
-            advertise_mdns: true,
-            relay_url: None,
+            advertise_mdns: false,
+            relay_url: Some("wss://vision-pro.34-73-186-88.sslip.io".into()),
             relay_token: None,
-            usb_direct: true,
+            usb_direct: false,
         }
     }
 }
@@ -195,6 +195,12 @@ impl Settings {
         match std::fs::read(&path) {
             Ok(bytes) => match serde_json::from_slice::<Settings>(&bytes) {
                 Ok(mut settings) => {
+                    settings.network.mode = NetworkMode::RemoteAccess;
+                    settings.network.advertise_mdns = false;
+                    settings.network.usb_direct = false;
+                    if settings.network.relay_url.is_none() {
+                        settings.network.relay_url = NetworkSettings::default().relay_url;
+                    }
                     settings.sanitize();
                     settings
                 }
@@ -267,11 +273,16 @@ mod tests {
     }
 
     #[test]
-    fn usb_direct_is_on_by_default_and_for_older_settings_files() {
-        assert!(Settings::default().network.usb_direct);
+    fn internet_defaults_disable_local_discovery_and_usb() {
+        assert!(!Settings::default().network.usb_direct);
+        assert_eq!(
+            Settings::default().network.mode,
+            super::NetworkMode::RemoteAccess
+        );
+        assert!(!Settings::default().network.advertise_mdns);
         let older: Settings =
             serde_json::from_str(r#"{"network":{"mode":"local-only","httpsPort":47800}}"#).unwrap();
-        assert!(older.network.usb_direct);
+        assert!(!older.network.usb_direct);
     }
 
     #[test]

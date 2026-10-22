@@ -51,6 +51,7 @@ struct StoreFile {
     mac: String,
 }
 
+#[derive(Clone)]
 pub struct DeviceStore {
     devices: Vec<DeviceRecord>,
     pub integrity_warning: bool,

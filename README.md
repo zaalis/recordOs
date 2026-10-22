@@ -1,6 +1,6 @@
-# Vision-Pro
+# Record OS
 
-Vision-Pro turns an iPad into a secure, low-latency graphics tablet and trackpad for a Windows PC: Apple Pencil (pressure, tilt, hover), touch, gestures, keyboard and creative-app shortcuts. Nothing is captured or streamed from the PC — you look at the PC's own screen. The iPad's input travels through one end-to-end encrypted connection to the Windows agent, which validates it and injects it.
+Record OS turns an iPad into a secure, low-latency graphics tablet and trackpad for a Windows PC: Apple Pencil (pressure, tilt, hover), touch, gestures, keyboard and creative-app shortcuts. Nothing is captured or streamed from the PC — you look at the PC's own screen. The iPad's input travels through one end-to-end encrypted connection to the Windows agent, which validates it and injects it.
 
 The product contains an iPad PWA, a native Windows/Tauri control application backed by Rust, a shared binary and session protocol, and an optional loopback account service.
 
@@ -44,8 +44,8 @@ The secure default binds the agent on the local network at HTTPS port `47800`, a
 
 ## Connecting an iPad
 
-1. On the PC: **Connect Device** (Connecter un appareil). Vision-Pro shows a 6-digit code and an address such as `http://192.168.1.20:47801`.
-2. On the iPad, type that address in Safari. The first time, the page installs the PC's trust profile (Settings → Profile Downloaded → Install, then Settings → General → About → Certificate Trust Settings), then opens Vision-Pro by itself.
+1. On the PC: **Connect Device** (Connecter un appareil). Record OS shows a 6-digit code and an address such as `http://192.168.1.20:47801`.
+2. On the iPad, type that address in Safari. The first time, the page installs the PC's trust profile (Settings → Profile Downloaded → Install, then Settings → General → About → Certificate Trust Settings), then opens Record OS by itself.
 3. Enter the code. The iPad is paired and the session starts; later it reconnects with **Connect** alone.
 
 The code is the authorization: it is valid for five minutes, allows five attempts and is replaced as soon as it has paired a device.
@@ -54,7 +54,7 @@ The code is the authorization: it is valid for five minutes, allows five attempt
 
 The public deployment at https://vision-pro.34-73-186-88.sslip.io supports first pairing over the Internet. Configure that hostname in the PC's **Network → Remote Access**, then on the iPad choose **Autre ordinateur** and enter the PC's Agent ID, full Internet fingerprint from **About**, and the code shown by **Connect Device**. Later connections use the saved PC key and relay. See [deployment and usage](docs/DEPLOYMENT-2026-10-22.md).
 
-- **Tailscale (recommended).** Install [Tailscale](https://tailscale.com) on the PC and the iPad with the same account. The PC's Tailscale address (`100.x.y.z`) is accepted like a local one and **Connect Device** shows it too: open that address on the iPad once (profile + code) and it works from anywhere — no server, no open port, encrypted WireGuard tunnel plus Vision-Pro's own end-to-end encryption. Use the Tailscale address at home as well: the app, its pairing and its preferences belong to the address it was opened from.
+- **Tailscale (recommended).** Install [Tailscale](https://tailscale.com) on the PC and the iPad with the same account. The PC's Tailscale address (`100.x.y.z`) is accepted like a local one and **Connect Device** shows it too: open that address on the iPad once (profile + code) and it works from anywhere — no server, no open port, encrypted WireGuard tunnel plus Record OS's own end-to-end encryption. Use the Tailscale address at home as well: the app, its pairing and its preferences belong to the address it was opened from.
 - **Self-hosted relay.** Run `vp-relay` on a public host and enter it in **Network → Remote Access** (see below).
 
 ## Validation and builds
@@ -73,7 +73,7 @@ The end-to-end tests start their own debug `vp-agentd` with an isolated data dir
 
 ## USB Direct
 
-Plug the iPad (or an Android tablet) into the PC with a cable: Vision-Pro detects it instantly and the whole session goes through the cable, with no Wi-Fi or router. A Wi-Fi session in progress moves onto the cable when it is plugged in, and falls back to Wi-Fi within about a second when it is unplugged.
+Plug the iPad (or an Android tablet) into the PC with a cable: Record OS detects it instantly and the whole session goes through the cable, with no Wi-Fi or router. A Wi-Fi session in progress moves onto the cable when it is plugged in, and falls back to Wi-Fi within about a second when it is unplugged.
 
 The cable carries IP from the tablet's USB network function: Personal Hotspot on an iPad (Wi-Fi + Cellular models, with Apple's "Apple Devices" drivers on Windows) or USB tethering on Android. The PC app's **Network → USB cable** section shows the detected tablet, what to enable on it, and a one-click (UAC) fix when Windows blocks the cable network. See [USB Direct](docs/USB.md).
 
@@ -93,7 +93,7 @@ The account service binds to `127.0.0.1` and is intended to sit behind a TLS rev
 
 ```powershell
 $env:VP_ACCOUNT_PORT = '3000'
-$env:VP_ACCOUNT_DATA = 'D:\Vision-Pro\users.json'
+$env:VP_ACCOUNT_DATA = 'D:\Record OS\users.json'
 $env:VP_WEB_ROOT = "$PWD\apps\ipad\dist"
 $env:VP_ALLOW_REGISTRATION = '0'
 npm run start --workspace @vision-pro/server

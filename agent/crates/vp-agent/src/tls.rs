@@ -91,11 +91,11 @@ impl LocalAuthority {
         params.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
         params.distinguished_name.push(
             DnType::CommonName,
-            format!("Vision-Pro Local Authority · {computer_name}"),
+            format!("Record OS Local Authority · {computer_name}"),
         );
         params
             .distinguished_name
-            .push(DnType::OrganizationName, "Vision-Pro");
+            .push(DnType::OrganizationName, "Record OS");
         params.key_usages = vec![
             KeyUsagePurpose::KeyCertSign,
             KeyUsagePurpose::CrlSign,
@@ -155,7 +155,7 @@ impl LocalAuthority {
         );
         params
             .distinguished_name
-            .push(DnType::OrganizationName, "Vision-Pro");
+            .push(DnType::OrganizationName, "Record OS");
         let now = OffsetDateTime::now_utc();
         params.not_before = now - Duration::hours(1);
         params.not_after = now + Duration::days(30);
@@ -191,15 +191,15 @@ impl LocalAuthority {
       <key>PayloadCertificateFileName</key><string>vision-pro-local-authority.cer</string>
       <key>PayloadContent</key><data>{data}</data>
       <key>PayloadDescription</key><string>Lets this iPad verify the secure connection to {name}. Valid only for local network and Tailscale addresses.</string>
-      <key>PayloadDisplayName</key><string>Vision-Pro Local Authority</string>
+      <key>PayloadDisplayName</key><string>Record OS Local Authority</string>
       <key>PayloadIdentifier</key><string>app.vision-pro.local-authority.{payload_uuid}</string>
       <key>PayloadType</key><string>com.apple.security.root</string>
       <key>PayloadUUID</key><string>{payload_uuid}</string>
       <key>PayloadVersion</key><integer>1</integer>
     </dict>
   </array>
-  <key>PayloadDescription</key><string>Secure local connection to {name} with Vision-Pro.</string>
-  <key>PayloadDisplayName</key><string>Vision-Pro · {name}</string>
+  <key>PayloadDescription</key><string>Secure local connection to {name} with Record OS.</string>
+  <key>PayloadDisplayName</key><string>Record OS · {name}</string>
   <key>PayloadIdentifier</key><string>app.vision-pro.profile.{profile_uuid}</string>
   <key>PayloadRemovalDisallowed</key><false/>
   <key>PayloadType</key><string>Configuration</string>

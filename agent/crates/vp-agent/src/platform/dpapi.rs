@@ -23,7 +23,7 @@ pub fn protect(data: &[u8], purpose: &str) -> anyhow::Result<Vec<u8>> {
     unsafe {
         CryptProtectData(
             &input,
-            windows::core::w!("Vision-Pro"),
+            windows::core::w!("Record OS"),
             Some(&entropy_blob),
             None,
             None,

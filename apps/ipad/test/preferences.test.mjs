@@ -26,3 +26,9 @@ test('screen-streaming preferences of earlier versions are dropped, the rest is 
   assert.deepEqual(prefs.toolbar, { ...DEFAULT_PREFERENCES.toolbar, edge: 'left' });
   assert.equal(prefs.autoHideToolbar, true);
 });
+
+
+test('surface style keeps defaults on upgrade and bounds stored customization',()=>{
+ const value=preferencesFrom({surfaceStyle:{trail:true,trailColor:'not-a-color',trailDuration:99999,patternSpacing:-1,pattern:'bad'}}).surfaceStyle;
+ assert.equal(value.trail,true);assert.equal(value.trailColor,DEFAULT_PREFERENCES.surfaceStyle.trailColor);assert.equal(value.trailDuration,1500);assert.equal(value.patternSpacing,8);assert.equal(value.pattern,'dots');
+});

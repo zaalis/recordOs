@@ -603,3 +603,95 @@ async fn turn_tcp_and_websocket_media_fallback() {
     assert!(!relay.relay.hub.is_online(&agent.id));
     assert_eq!(relay.relay.turn.allocation_count(), 0);
 }
+
+async fn lookup(relay: &RunningRelay, code: &str) -> String {
+    let mut stream = TcpStream::connect(relay.http_addr).await.unwrap();
+    stream
+        .write_all(
+            format!("POST /v1/pair HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", serde_json::json!({"code":code}).to_string().len(), serde_json::json!({"code":code}))
+                .as_bytes(),
+        )
+        .await
+        .unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).await.unwrap();
+    response
+}
+
+#[tokio::test]
+async fn temporary_pairing_codes_are_authenticated_bounded_and_removed() {
+    let relay = relay().await;
+    let key = SigningKey::random(&mut rand::rngs::OsRng);
+    let mut agent = register(&relay, &key, Some(TOKEN)).await.unwrap();
+    let expires = vp_relay::util::now_unix() + 90;
+    agent
+        .ws
+        .send(Message::Text(
+            json!({"t":"pair.publish","code":"0482","expires":expires})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let found = lookup(&relay, "0482").await;
+    assert!(found.starts_with("HTTP/1.1 200"), "{found}");
+    assert!(found.contains(&agent.id));
+    assert!(found.to_lowercase().contains("cache-control: no-store"));
+    // Re-publishing the same code never resets its attempt budget.
+    for _ in 0..4 {
+        assert!(lookup(&relay, "0482").await.starts_with("HTTP/1.1 200"));
+    }
+    agent
+        .ws
+        .send(Message::Text(
+            json!({"t":"pair.publish","code":"0482","expires":expires})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(lookup(&relay, "0482").await.starts_with("HTTP/1.1 429"));
+    agent.ws.close(None).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(!relay.relay.invitations.lock().contains_key(&agent.id));
+}
+
+#[tokio::test]
+async fn relay_reports_rate_limit_instead_of_an_unexplained_reconnect() {
+    let relay = relay().await;
+    let key = SigningKey::random(&mut rand::rngs::OsRng);
+    let mut agent = register(&relay, &key, Some(TOKEN)).await.unwrap();
+    let connect = format!("ws://{}/v1/connect/{}", relay.http_addr, agent.id);
+    let task =
+        tokio::spawn(async move { tokio_tungstenite::connect_async(connect).await.unwrap().0 });
+    let incoming = next_json(&mut agent.ws).await;
+    let accept = format!(
+        "ws://{}/v1/accept/{}",
+        relay.http_addr,
+        incoming["ticket"].as_str().unwrap()
+    );
+    let (mut data, _) = tokio_tungstenite::connect_async(accept).await.unwrap();
+    let mut client = task.await.unwrap();
+    let drain = tokio::spawn(async move { while let Some(Ok(_)) = data.next().await {} });
+    for _ in 0..450 {
+        if client.send(Message::Text("{}".into())).await.is_err() {
+            break;
+        }
+    }
+    let frame = timeout(Duration::from_secs(3), async {
+        loop {
+            match client.next().await {
+                Some(Ok(Message::Close(frame))) => break frame.unwrap(),
+                Some(Ok(_)) => {}
+                other => panic!("unexpected close: {other:?}"),
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(u16::from(frame.code), 1008);
+    assert_eq!(frame.reason, "rate_limited");
+    drain.abort();
+}

@@ -15,7 +15,7 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, Path, State};
 use axum::http::{HeaderMap, Request, Response, StatusCode};
 use axum::response::IntoResponse;
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::Router;
 use futures_util::{SinkExt, StreamExt};
 use hyper_util::rt::TokioIo;
@@ -23,6 +23,7 @@ use p256::ecdsa::signature::Verifier;
 use p256::ecdsa::{Signature, VerifyingKey};
 use serde::Deserialize;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use std::net::{IpAddr, SocketAddr, SocketAddrV4};
 use std::sync::Arc;
 use std::time::Duration;
@@ -43,6 +44,7 @@ pub fn router(relay: Arc<Relay>) -> Router {
     Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route("/v1/agent", get(agent_handler))
+        .route("/v1/pair", post(pair_handler))
         .route("/v1/connect/{agent_id}", get(connect_handler))
         .route("/v1/accept/{ticket}", get(accept_handler))
         .with_state(relay)
@@ -132,6 +134,8 @@ struct Register {
 #[derive(Deserialize)]
 #[serde(tag = "t")]
 enum AgentMessage {
+    #[serde(rename = "pair.publish")]
+    PairPublish { code: String, expires: u64 },
     #[serde(rename = "turn.issue")]
     TurnIssue { id: u32, ttl: u64 },
     #[serde(rename = "turn.release")]
@@ -277,6 +281,19 @@ async fn agent_session(relay: Arc<Relay>, ip: IpAddr, socket: WebSocket) {
                 match incoming {
                     Some(Ok(Message::Text(text))) => {
                         match serde_json::from_str::<AgentMessage>(&text) {
+                            Ok(AgentMessage::PairPublish { code, expires }) => {
+                                let mut invitations = relay.invitations.lock();
+                                invitations.retain(|_, (_, _, until, _)| *until > crate::util::now_unix());
+                                if code.len() == 4 && code.bytes().all(|b| b.is_ascii_digit()) && expires > crate::util::now_unix() && expires <= crate::util::now_unix() + 125 {
+                                    if invitations.iter().any(|(owner, (pin, _, _, _))| owner != &agent_id && pin == &code) {
+                                        let _ = tx.try_send(Outgoing::Text(json!({"t":"pair.collision"}).to_string()));
+                                    } else if invitations.len() < 10000 || invitations.contains_key(&agent_id) {
+                                        let fingerprint = b64u(&Sha256::digest(from_b64u(&register.as_ref().unwrap().agent_pub, 65).unwrap()));
+                                        let attempts = invitations.get(&agent_id).filter(|(pin, _, _, _)| pin == &code).map(|x| x.3).unwrap_or(0);
+                                        invitations.insert(agent_id.clone(), (code, fingerprint, expires, attempts));
+                                    }
+                                } else { invitations.remove(&agent_id); }
+                            }
                             Ok(AgentMessage::TurnIssue { id, ttl }) => {
                                 let reply = match relay.turn.issue(&agent_id, conn_id, ttl) {
                                     Some(credential) => json!({
@@ -313,6 +330,7 @@ async fn agent_session(relay: Arc<Relay>, ip: IpAddr, socket: WebSocket) {
     }
     relay.hub.unregister(&agent_id, conn_id);
     relay.turn.release_connection(conn_id);
+    relay.invitations.lock().remove(&agent_id);
     let _ = sink.send(Message::Close(None)).await;
     tracing::info!(agent = %agent_id, "agent disconnected");
 }
@@ -385,42 +403,61 @@ async fn splice(client: WebSocket, agent: WebSocket, mut stopping: watch::Receiv
     let mut ping = tokio::time::interval(Duration::from_secs(25));
     ping.tick().await;
     let mut window = (tokio::time::Instant::now(), 0u32);
+    let started = tokio::time::Instant::now();
+    let close_reason: &str;
     loop {
         if window.0.elapsed() >= Duration::from_secs(1) {
             window = (tokio::time::Instant::now(), 0);
         }
         tokio::select! {
-            _ = stopping.changed() => break,
+            _ = stopping.changed() => { close_reason = "server_shutdown"; break; },
             message = client_rx.next() => match message {
                 Some(Ok(Message::Text(text))) => {
                     window.1 += 1;
-                    if window.1 > MAX_SIGNAL_RATE || agent_tx.send(Message::Text(text)).await.is_err() {
+                    if window.1 > MAX_SIGNAL_RATE {
+                        close_reason = "rate_limited";
+                        tracing::warn!(frames = window.1, "relay input rate exceeded");
                         break;
                     }
+                    if agent_tx.send(Message::Text(text)).await.is_err() { close_reason = "agent_write_failed"; break; }
                 }
                 Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
-                _ => break,
+                _ => { close_reason = "client_closed"; break; },
             },
             message = agent_rx.next() => match message {
                 Some(Ok(Message::Text(text))) => {
                     if client_tx.send(Message::Text(text)).await.is_err() {
-                        break;
+                        close_reason = "client_write_failed"; break;
                     }
                 }
                 Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
-                _ => break,
+                _ => { close_reason = "agent_closed"; break; },
             },
             _ = ping.tick() => {
                 if client_tx.send(Message::Ping(Vec::new().into())).await.is_err()
                     || agent_tx.send(Message::Ping(Vec::new().into())).await.is_err()
                 {
-                    break;
+                    close_reason = "heartbeat_write_failed"; break;
                 }
             }
         }
     }
-    let _ = client_tx.send(Message::Close(None)).await;
-    let _ = agent_tx.send(Message::Close(None)).await;
+    tracing::info!(
+        reason = close_reason,
+        duration_ms = started.elapsed().as_millis() as u64,
+        frames_in_window = window.1,
+        "relay session closed"
+    );
+    let frame = axum::extract::ws::CloseFrame {
+        code: if close_reason == "rate_limited" {
+            1008
+        } else {
+            1000
+        },
+        reason: close_reason.into(),
+    };
+    let _ = client_tx.send(Message::Close(Some(frame.clone()))).await;
+    let _ = agent_tx.send(Message::Close(Some(frame))).await;
 }
 
 #[cfg(test)]
@@ -482,4 +519,35 @@ mod tests {
         )
         .is_ok());
     }
+}
+
+#[derive(Deserialize)]
+struct PairLookup {
+    code: String,
+}
+
+async fn pair_handler(
+    State(relay): State<Arc<Relay>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    axum::Json(PairLookup { code }): axum::Json<PairLookup>,
+) -> Response<Body> {
+    let ip = client_ip(&relay, peer, &headers);
+    if !relay.pairing_limiter.allow(ip) {
+        return StatusCode::TOO_MANY_REQUESTS.into_response();
+    }
+    let mut invitations = relay.invitations.lock();
+    invitations.retain(|_, (_, _, expires, _)| *expires > crate::util::now_unix());
+    let result = invitations
+        .iter_mut()
+        .find(|(_, (pin, _, _, attempts))| pin == &code && *attempts < 5);
+    let Some((agent, (_, fingerprint, _, attempts))) = result else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    *attempts += 1;
+    (
+        [("cache-control", "no-store")],
+        axum::Json(json!({"agentId":agent,"fingerprint":fingerprint})),
+    )
+        .into_response()
 }

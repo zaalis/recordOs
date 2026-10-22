@@ -61,7 +61,6 @@ type Gesture =
 const SLOP = 10;
 const LONG_PRESS_MS = 480;
 const TAP_MS = 280;
-const PALM_WINDOW_MS = 600;
 
 type Settings = Pick<
   Preferences,
@@ -92,7 +91,8 @@ export class InputController {
   private momentumFrame = 0;
   private penInContact = false;
   private penHovering = false;
-  private penSeenAt = 0;
+  private penLast = { x: 0.5, y: 0.5 };
+  private mouseHeld = new Set<number>();
   private dragArmed = false;
   private ctrlForPinch = false;
   mode: ControlMode = 'direct';
@@ -166,6 +166,7 @@ export class InputController {
     this.gesture = 'none';
     this.penInContact = false;
     this.penHovering = false;
+    this.mouseHeld.clear();
     this.sink.reliable(this.encoder.releaseAll());
   }
 
@@ -214,12 +215,12 @@ export class InputController {
   private begin3DGesture(kind: 'orbit' | 'pan', centroid: { x: number; y: number }): void {
     this.end3DGesture();
     const n = this.normalize(centroid.x, centroid.y);
-    this.sink.reliable(this.encoder.moveAbs(n.x, n.y));
+    if (this.threeDNavigation !== 'blender') this.sink.reliable(this.encoder.moveAbs(n.x, n.y));
     const binding = this.navigationBinding(kind);
     for (const key of binding.keys) this.sink.reliable(this.encoder.key(key, true));
     this.navigationKeys = binding.keys;
     this.navigationButton = binding.button;
-    this.sink.reliable(this.encoder.button(binding.button, true, n.x, n.y));
+    this.sink.reliable(this.encoder.button(binding.button, true, this.threeDNavigation === 'blender' ? null : n.x, this.threeDNavigation === 'blender' ? null : n.y));
   }
 
   private end3DGesture(): void {
@@ -230,7 +231,7 @@ export class InputController {
   }
 
   private canUseThreeFingerNavigation(): boolean {
-    return this.threeDNavigation !== 'none' && (this.mode !== 'pencil' || this.settings.pencilFingers === 'touch');
+    return this.threeDNavigation !== 'none' && (this.mode !== 'pencil' || this.settings.pencilFingers !== 'ignore');
   }
 
   // ---------------------------------------------------------------------------
@@ -250,7 +251,11 @@ export class InputController {
     if (e.pointerType === 'pen') { this.callbacks.onInputSource('pencil'); return this.penDown(e); }
     if (e.pointerType === 'mouse') { this.callbacks.onInputSource('pointer'); return this.mouseButton(e, true); }
     this.callbacks.onInputSource('fingers');
-    if (Date.now() - this.penSeenAt < PALM_WINDOW_MS || this.penInContact) return; // palm rejection
+    if (this.penInContact || this.mouseHeld.size) return;
+    if (this.penHovering) {
+      this.penPhase(PenPhase.Leave, this.penLast.x, this.penLast.y, 0, 0, 0);
+      this.penHovering = false;
+    }
     if (this.mode === 'pencil' && this.settings.pencilFingers === 'ignore') {
       this.pointers.set(e.pointerId, { id: e.pointerId, x0: e.clientX, y0: e.clientY, x: e.clientX, y: e.clientY, t0: performance.now() });
       this.maxPointers = Math.max(this.maxPointers, this.pointers.size);
@@ -329,7 +334,7 @@ export class InputController {
         }
         return;
       case 'drag': {
-        for (const sample of coalesced(e)) {
+        for (const sample of coalesced(e).slice(-1)) {
           const n = this.normalize(sample.clientX, sample.clientY);
           // A newer position is always more useful than an old one. Keep drag
           // start/end reliable, but never queue the intermediate cursor path.
@@ -413,8 +418,13 @@ export class InputController {
     } else if (this.gesture === 'scroll') {
       this.scroll(dx, dy, c.x, c.y);
     } else if (this.gesture === 'orbit-3d' || this.gesture === 'pan-3d') {
-      const n = this.normalize(c.x, c.y);
-      this.sink.realtime(this.encoder.moveAbs(n.x, n.y));
+      if (this.threeDNavigation === 'blender') {
+        const rect = this.contentRect();
+        if (rect) this.sink.realtime(this.encoder.moveRel(dx / Math.max(1, rect.width), dy / Math.max(1, rect.height)));
+      } else {
+        const n = this.normalize(c.x, c.y);
+        this.sink.realtime(this.encoder.moveAbs(n.x, n.y));
+      }
     }
     this.lastCentroid = c;
   }
@@ -645,13 +655,15 @@ export class InputController {
   }
 
   private penPhase(phase: number, x: number, y: number, pressure: number, tiltX: number, tiltY: number, twist = 0, realtime = false): void {
+    this.penLast = { x, y };
     const buffer = this.encoder.pen({ phase, x, y, pressure, tiltX, tiltY, twist, buttons: this.penButtons() });
     if (realtime) this.sink.realtime(buffer);
     else this.sink.reliable(buffer);
   }
 
   private penDown(e: PointerEvent): void {
-    this.penSeenAt = Date.now();
+    if (this.pointers.size || this.mouseHeld.size) return;
+    this.end3DGesture();
     // A pen landing while fingers are down cancels any finger gesture (palm on screen).
     if (this.pointers.size > 0) {
       if (this.gesture === 'drag') this.sink.reliable(this.encoder.button(MouseButton.Left, false, null, null));
@@ -673,10 +685,10 @@ export class InputController {
 
   private penMove(e: PointerEvent): void {
     e.preventDefault();
-    this.penSeenAt = Date.now();
+    if (this.pointers.size || this.mouseHeld.size) return;
     const contact = this.penInContact && (e.buttons & 1) === 1;
     if (!this.settings.pencilWindowsInk) {
-      for (const sample of coalesced(e)) {
+      for (const sample of coalesced(e).slice(-1)) {
         const n = this.normalize(sample.clientX, sample.clientY);
         if (contact) this.sink.realtime(this.encoder.moveAbs(n.x, n.y));
         else if (this.settings.pencilHover) this.sink.realtime(this.encoder.moveAbs(n.x, n.y));
@@ -684,11 +696,11 @@ export class InputController {
       return;
     }
     if (!contact && !this.settings.pencilHover) return;
-    for (const sample of coalesced(e)) {
+    for (const sample of coalesced(e).slice(-1)) {
       const n = this.normalize(sample.clientX, sample.clientY);
       const { tx, ty, twist } = this.tilt(sample);
       if (contact) {
-        this.penPhase(PenPhase.Move, n.x, n.y, this.pressure(sample.pressure), tx, ty, twist);
+        this.penPhase(PenPhase.Move, n.x, n.y, this.pressure(sample.pressure), tx, ty, twist, true);
       } else {
         this.penPhase(PenPhase.Hover, n.x, n.y, 0, tx, ty, twist, true);
         this.penHovering = true;
@@ -697,7 +709,6 @@ export class InputController {
   }
 
   private penUp(e: PointerEvent, cancelled: boolean): void {
-    this.penSeenAt = Date.now();
     if (!this.penInContact) return;
     const n = this.normalize(e.clientX, e.clientY);
     if (!this.settings.pencilWindowsInk) {
@@ -714,6 +725,8 @@ export class InputController {
   // ---------------------------------------------------------------------------
 
   private mouseButton(e: PointerEvent, down: boolean): void {
+    if (this.penInContact || this.pointers.size) return;
+    if (down) this.mouseHeld.add(e.button); else this.mouseHeld.delete(e.button);
     e.preventDefault();
     const button = e.button === 2 ? MouseButton.Right : e.button === 1 ? MouseButton.Middle : e.button === 3 ? MouseButton.Back : e.button === 4 ? MouseButton.Forward : MouseButton.Left;
     const n = this.normalize(e.clientX, e.clientY);
@@ -722,8 +735,9 @@ export class InputController {
   }
 
   private mouseMove(e: PointerEvent): void {
+    if (this.penInContact || this.pointers.size) return;
     this.callbacks.onInputSource('pointer');
-    for (const sample of coalesced(e)) {
+    for (const sample of coalesced(e).slice(-1)) {
       const n = this.normalize(sample.clientX, sample.clientY);
       this.sink.realtime(this.encoder.moveAbs(n.x, n.y));
     }

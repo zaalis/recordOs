@@ -49,14 +49,14 @@ pub fn random_token(bytes: usize) -> String {
     b64u(&out)
 }
 
-/// Uniform random 6-digit code (rejection sampling, no modulo bias).
+/// Uniform random 4-digit code (rejection sampling, no modulo bias).
 pub fn random_code() -> String {
     use rand::RngCore;
     loop {
         let v = rand::rngs::OsRng.next_u32();
-        let limit = u32::MAX - (u32::MAX % 1_000_000);
+        let limit = u32::MAX - (u32::MAX % 10_000);
         if v < limit {
-            return format!("{:06}", v % 1_000_000);
+            return format!("{:04}", v % 10_000);
         }
     }
 }
@@ -95,6 +95,6 @@ mod tests {
             "Bryan's iPad"
         );
         assert_eq!(sanitize_name("\n", 48), "Unnamed device");
-        assert_eq!(random_code().len(), 6);
+        assert_eq!(random_code().len(), 4);
     }
 }
