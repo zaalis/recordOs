@@ -1,7 +1,7 @@
 /*
  * End-to-end signaling through a Vision-Pro relay against a running agent in Remote Access mode:
  *   vp-relay --host 127.0.0.1 --http 127.0.0.1:18080 --turn 127.0.0.1:13478 --token <token>
- *   vp-agentd --connect --approve-all   (settings: remote-access, relayUrl ws://127.0.0.1:18080)
+ *   vp-agentd --connect   (settings: remote-access, relayUrl ws://127.0.0.1:18080)
  *   VP_AGENT_ID=… VP_CODE=… node --experimental-strip-types test/e2e-relay.ts
  */
 import assert from 'node:assert/strict';
@@ -10,7 +10,6 @@ import { SignalingClient, generateDeviceIdentity, relayConnectUrl, type ClientEv
 const RELAY = process.env.VP_RELAY ?? 'ws://127.0.0.1:18080';
 const AGENT_ID = process.env.VP_AGENT_ID ?? '';
 const CODE = process.env.VP_CODE ?? '';
-const TURN_PORT = process.env.VP_TURN_PORT ?? '13478';
 assert.ok(AGENT_ID.length === 22 && CODE.length === 6, 'VP_AGENT_ID and VP_CODE are required');
 
 const URL = relayConnectUrl(RELAY, AGENT_ID)!;
@@ -33,11 +32,7 @@ const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 function assertRelayedSession(session: SessionReady) {
   assert.equal(session.relay?.url, RELAY, 'the PC announces its relay inside the encrypted channel');
-  assert.equal(session.ice?.iceTransportPolicy, 'relay');
-  const server = session.ice!.iceServers[0]!;
-  assert.ok(server.urls.includes(`turn:127.0.0.1:${TURN_PORT}?transport=udp`), JSON.stringify(server.urls));
-  assert.match(server.username, /^\d+:[A-Za-z0-9_-]{24}$/);
-  assert.equal(server.credential.length, 43);
+  assert.equal(session.link, 'relay');
 }
 
 const identity = await generateDeviceIdentity();
@@ -54,7 +49,7 @@ const identity = await generateDeviceIdentity();
   const events = await done;
   console.log('pair without code:', kinds(events));
   const hello = events[0] as Extract<ClientEvent, { type: 'hello' }>;
-  assert.equal(hello.hello.pairing.nearby, false, 'nearby pairing is never offered through the relay');
+  assert.deepEqual(hello.hello.pairing, { code: true });
   assert.deepEqual(kinds(events), ['hello', 'error:pairing_disabled']);
 }
 
@@ -63,7 +58,7 @@ let fingerprint = '';
   const { client, done } = run(identity, 'pair', { proof: { kind: 'code', secret: CODE } });
   const events = await done;
   console.log('pair with code:', kinds(events));
-  assert.deepEqual(kinds(events), ['hello', 'pairing', 'paired', 'ready']);
+  assert.deepEqual(kinds(events), ['hello', 'paired', 'ready']);
   const ready = events.at(-1) as Extract<ClientEvent, { type: 'ready' }>;
   assertRelayedSession(ready.session);
   const { fingerprintOf } = await import('../src/index.ts');

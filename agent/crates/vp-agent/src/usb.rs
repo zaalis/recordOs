@@ -563,7 +563,7 @@ pub fn apply(core: &Arc<Core>, next: UsbStatus) {
         );
     }
     if !changes.links_up.is_empty() {
-        // iPads streaming over Wi-Fi check whether they are the one on the cable and move.
+        // iPads connected over Wi-Fi check whether they are the one on the cable and move.
         core.sessions.offer_usb(&next.urls());
     }
     let _ = core.events.send(AgentEvent::UsbChanged);

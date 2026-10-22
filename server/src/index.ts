@@ -4,25 +4,29 @@ import { stat } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { extname, isAbsolute, join, normalize, relative, resolve, sep } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { isIP } from 'node:net';
 import { RateGuard, constantEqual, randomToken, securityHeaders, tokenHash } from './security.ts';
-import { UserStore } from './store.ts';
+import { DuplicateUserError, UserStore } from './store.ts';
 
 const port = boundedInt(process.env.VP_ACCOUNT_PORT, 3000, 1024, 65535);
 const registration = process.env.VP_ALLOW_REGISTRATION === '1';
 const insecureDev = process.env.VP_INSECURE_DEV === '1';
+const trustProxy = process.env.VP_TRUST_PROXY === '1';
 const dataPath = resolve(process.env.VP_ACCOUNT_DATA ?? join(process.cwd(), 'data', 'users.json'));
 const webRoot = resolve(process.env.VP_WEB_ROOT ?? join(process.cwd(), '..', 'apps', 'ipad', 'dist'));
 const store = new UserStore(dataPath);
 const sessions = new Map<string, { userId: string; expiresAt: number; csrf: string }>();
 const guard = new RateGuard(5, 10 * 60_000, 15 * 60_000);
+const loginGuard = new RateGuard(30, 10 * 60_000, 15 * 60_000);
+let passwordJobs = 0;
 await store.load();
 
 const server = createServer(async (req, res) => {
   const nonce = randomToken(18);
   for (const [name, value] of Object.entries(securityHeaders(nonce))) res.setHeader(name, value);
   res.setHeader('cache-control', 'no-store');
-  const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
   try {
+    const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
     if (url.pathname.startsWith('/api/account/')) return await accountRoute(url.pathname.slice(13), req, res);
     if (req.method !== 'GET' && req.method !== 'HEAD') return json(res, 405, { error: 'method_not_allowed' });
     return await staticFile(url.pathname, req, res);
@@ -46,20 +50,34 @@ async function accountRoute(route: string, req: IncomingMessage, res: ServerResp
   if (route === 'register') {
     if (!registration) return json(res, 403, { error: 'registration_disabled' });
     if (guard.check(`ip:${ip}`)) return json(res, 429, { error: 'rate_limited' });
+    guard.fail(`ip:${ip}`);
     const password = typeof body.password === 'string' ? body.password : '';
     const name = cleanName(body.name);
     if (!validEmail(email) || !name) return json(res, 400, { error: 'invalid_input' });
     if (password.length < 12 || password.length > 256) return json(res, 400, { error: 'weak_password' });
     if (store.byEmail(email)) return json(res, 409, { error: 'email_taken' });
-    const user = { id: randomUUID(), email, name, passwordHash: await argon2.hash(password, { type: argon2.argon2id, memoryCost: 65536, timeCost: 3, parallelism: 1 }), createdAt: Date.now(), passkeys: 0 };
-    await store.insert(user); return establish(req, res, user.id);
+    if (passwordJobs >= 2) return json(res, 429, { error: 'rate_limited' });
+    let passwordHash: string;
+    passwordJobs++;
+    try { passwordHash = await argon2.hash(password, { type: argon2.argon2id, memoryCost: 65536, timeCost: 3, parallelism: 1 }); }
+    finally { passwordJobs--; }
+    const user = { id: randomUUID(), email, name, passwordHash, createdAt: Date.now(), passkeys: 0 };
+    try { await store.insert(user); }
+    catch (error) { if (error instanceof DuplicateUserError) return json(res, 409, { error: 'email_taken' }); throw error; }
+    return establish(req, res, user.id);
   }
   if (route === 'login') {
+    if (loginGuard.check(ip)) return json(res, 429, { error: 'rate_limited' });
+    loginGuard.fail(ip);
     const key = `login:${ip}:${email}`; const wait = guard.check(key);
     if (wait) { res.setHeader('retry-after', Math.ceil(wait / 1000)); return json(res, 429, { error: 'locked' }); }
     const user = store.byEmail(email); const password = typeof body.password === 'string' ? body.password : '';
-    const ok = !!user && password.length <= 256 && await argon2.verify(user.passwordHash, password).catch(() => false);
-    if (!ok) { guard.fail(key); return json(res, 401, { error: 'invalid_credentials' }); }
+    if (passwordJobs >= 2) return json(res, 429, { error: 'rate_limited' });
+    let ok = false;
+    passwordJobs++;
+    try { ok = !!user && password.length <= 256 && await argon2.verify(user.passwordHash, password).catch(() => false); }
+    finally { passwordJobs--; }
+    if (!ok || !user) { guard.fail(key); return json(res, 401, { error: 'invalid_credentials' }); }
     guard.success(key); return establish(req, res, user.id);
   }
   if (route === 'logout') { const token = cookie(req, sessionCookieName()); if (token) sessions.delete(tokenHash(token)); clearSession(res); return json(res, 200, { ok: true }); }
@@ -81,8 +99,16 @@ function publicUser(user: ReturnType<UserStore['byId']>) { return user ? { id: u
 
 async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> { const chunks: Buffer[] = []; let size = 0; for await (const chunk of req) { size += chunk.length; if (size > 32_768) throw new Error('body_too_large'); chunks.push(chunk); } try { return JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown>; } catch { return {}; } }
 function cookie(req: IncomingMessage, name: string) { for (const pair of (req.headers.cookie ?? '').split(';')) { const [key, ...value] = pair.trim().split('='); if (key === name) return value.join('='); } return undefined; }
-function sameOrigin(req: IncomingMessage) { const origin = req.headers.origin; if (!origin) return false; try { return new URL(origin).host === req.headers.host; } catch { return false; } }
-function clientIp(req: IncomingMessage) { return req.socket.remoteAddress ?? 'unknown'; }
+function sameOrigin(req: IncomingMessage) { const origin = req.headers.origin; if (!origin) return false; try { const parsed = new URL(origin); return parsed.host === req.headers.host && parsed.protocol === (insecureDev ? 'http:' : 'https:'); } catch { return false; } }
+function clientIp(req: IncomingMessage) {
+  const peer = req.socket.remoteAddress ?? 'unknown';
+  if (trustProxy && ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(peer)) {
+    const forwarded = req.headers['x-forwarded-for'];
+    const ip = typeof forwarded === 'string' ? forwarded.split(',').at(-1)?.trim() : undefined;
+    if (ip && isIP(ip)) return ip;
+  }
+  return peer;
+}
 function normalizeEmail(value: unknown) { return typeof value === 'string' ? value.trim().toLowerCase() : ''; }
 function validEmail(value: string) { return value.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value); }
 function cleanName(value: unknown) { return typeof value === 'string' ? value.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 64) : ''; }

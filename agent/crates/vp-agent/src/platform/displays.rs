@@ -1,83 +1,27 @@
-//! D3D11 device creation and display (output) enumeration.
+//! Display (output) enumeration: what a session's absolute input can be mapped to.
 
-use windows::core::{Interface, PCWSTR};
+use windows::core::PCWSTR;
 use windows::Win32::Devices::Display::{
     DisplayConfigGetDeviceInfo, GetDisplayConfigBufferSizes, QueryDisplayConfig,
     DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME, DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME,
     DISPLAYCONFIG_MODE_INFO, DISPLAYCONFIG_PATH_INFO, DISPLAYCONFIG_SOURCE_DEVICE_NAME,
     DISPLAYCONFIG_TARGET_DEVICE_NAME, QDC_ONLY_ACTIVE_PATHS,
 };
-use windows::Win32::Foundation::{HMODULE, RECT};
-use windows::Win32::Graphics::Direct3D::{
-    D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1,
-};
-use windows::Win32::Graphics::Direct3D11::{
-    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Multithread,
-    D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_SDK_VERSION,
-};
+use windows::Win32::Foundation::RECT;
 use windows::Win32::Graphics::Dxgi::{
-    CreateDXGIFactory1, IDXGIAdapter1, IDXGIFactory1, IDXGIOutput1, DXGI_ADAPTER_FLAG_SOFTWARE,
+    CreateDXGIFactory1, IDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE,
 };
 use windows::Win32::Graphics::Gdi::{EnumDisplaySettingsW, DEVMODEW, ENUM_CURRENT_SETTINGS};
-
-pub struct Gpu {
-    pub device: ID3D11Device,
-    pub context: ID3D11DeviceContext,
-    pub adapter: IDXGIAdapter1,
-    pub luid: (u32, i32),
-    pub name: String,
-    pub vendor_id: u32,
-}
-
-// COM pointers are only used from the owning pipeline thread; the device is multithread-protected.
-unsafe impl Send for Gpu {}
-
-impl Gpu {
-    pub fn for_adapter(adapter: &IDXGIAdapter1) -> anyhow::Result<Gpu> {
-        unsafe {
-            let desc = adapter.GetDesc1()?;
-            let mut device = None;
-            let mut context = None;
-            D3D11CreateDevice(
-                adapter,
-                D3D_DRIVER_TYPE_UNKNOWN,
-                HMODULE::default(),
-                D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
-                Some(&[D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0]),
-                D3D11_SDK_VERSION,
-                Some(&mut device),
-                None,
-                Some(&mut context),
-            )?;
-            let device = device.ok_or_else(|| anyhow::anyhow!("no D3D11 device"))?;
-            let context = context.ok_or_else(|| anyhow::anyhow!("no D3D11 context"))?;
-            let multithread: ID3D11Multithread = device.cast()?;
-            let _ = multithread.SetMultithreadProtected(true);
-            Ok(Gpu {
-                device,
-                context,
-                adapter: adapter.clone(),
-                luid: (desc.AdapterLuid.LowPart, desc.AdapterLuid.HighPart),
-                name: wide_to_string(&desc.Description),
-                vendor_id: desc.VendorId,
-            })
-        }
-    }
-}
 
 #[derive(Clone)]
 pub struct Output {
     pub id: String,
     pub name: String,
     pub device_name: String,
-    pub adapter: IDXGIAdapter1,
-    pub output: IDXGIOutput1,
     pub rect: RECT,
     pub refresh_hz: u32,
     pub primary: bool,
 }
-
-unsafe impl Send for Output {}
 
 impl Output {
     pub fn width(&self) -> u32 {
@@ -190,9 +134,6 @@ pub fn outputs() -> Vec<Output> {
                 if !out_desc.AttachedToDesktop.as_bool() {
                     continue;
                 }
-                let Ok(output1) = output.cast::<IDXGIOutput1>() else {
-                    continue;
-                };
                 let device_name = wide_to_string(&out_desc.DeviceName);
                 let rect = out_desc.DesktopCoordinates;
                 let primary = rect.left == 0 && rect.top == 0;
@@ -205,8 +146,6 @@ pub fn outputs() -> Vec<Output> {
                         .unwrap_or_else(|| format!("Display {index}")),
                     refresh_hz: refresh_rate(&device_name),
                     device_name,
-                    adapter: adapter.clone(),
-                    output: output1,
                     rect,
                     primary,
                 });

@@ -1,8 +1,9 @@
 import { Button, Icon } from '@vision-pro/design';
+import { PORTS } from '@vision-pro/protocol';
 
 /** Shown when the app is opened without HTTPS: keys and encryption would not be available. */
 export function Insecure() {
-  const secureUrl = `https://${location.hostname}:47800/`;
+  const secureUrl = `https://${location.hostname}:${PORTS.https}/`;
   return (
     <div className="page">
       <div className="ambient" />
@@ -15,7 +16,7 @@ export function Insecure() {
             Secure connection required
           </h1>
           <p className="hero-subtitle" style={{ marginTop: 0 }}>
-            Vision-Pro only runs over an encrypted connection, so your PC and this iPad can verify each other. Open the secure address shown on your PC.
+            Vision-Pro fonctionne uniquement par une connexion chiffrée, pour que le PC et cet iPad se vérifient. Ouvrez l’adresse affichée par « Connecter un appareil » sur le PC.
           </p>
           <div>
             <Button variant="primary" size="lg" onClick={() => (location.href = secureUrl)}>

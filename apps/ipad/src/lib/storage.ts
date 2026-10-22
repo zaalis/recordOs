@@ -2,7 +2,7 @@
  * Local persistence (IndexedDB). The device private key is a non-extractable CryptoKey: script can
  * use it to sign, but its bytes can never be read or exported — not even by this app.
  */
-import { type AppProfile, type DeviceIdentity, generateDeviceIdentity, type VideoSettings, DEFAULT_VIDEO_SETTINGS } from '@vision-pro/protocol';
+import { type AppProfile, type DeviceIdentity, generateDeviceIdentity } from '@vision-pro/protocol';
 
 const DB_NAME = 'vision-pro';
 const DB_VERSION = 1;
@@ -22,8 +22,6 @@ export interface KnownComputer {
 }
 
 export type ControlMode = 'direct' | 'trackpad' | 'pencil';
-export type StageMode = 'stream' | 'tablet';
-export type PinchAction = 'zoom-view' | 'zoom-app';
 export type ThreeFingerAction = 'none' | 'task-view' | 'show-desktop' | 'switch-app' | 'desktops';
 export type PencilFingers = 'navigate' | 'ignore' | 'touch';
 
@@ -31,15 +29,10 @@ export interface Preferences {
   deviceName: string;
   onboarded: boolean;
   controlMode: ControlMode;
-  stageMode: StageMode;
-  video: VideoSettings;
-  /** Lets us safely migrate only former product-default streaming presets. */
-  videoDefaultVersion: number;
   trackingSpeed: number;
   scrollSpeed: number;
   naturalScrolling: boolean;
   tapToClick: boolean;
-  pinchAction: PinchAction;
   threeFingerSwipe: ThreeFingerAction;
   pencilWindowsInk: boolean;
   pencilHover: boolean;
@@ -50,29 +43,19 @@ export interface Preferences {
   autoHideToolbar: boolean;
   autoProfiles: boolean;
   showStats: boolean;
-  showLocalCursor: boolean;
   toolbar: { edge: 'bottom' | 'top' | 'left' | 'right'; offset: number; collapsed: boolean };
   activeProfileId: string;
   keyboardExtras: string[];
 }
 
-/** Bumped whenever DEFAULT_VIDEO_SETTINGS changes (see loadPreferences). */
-const VIDEO_DEFAULT_VERSION = 4;
-
 export const DEFAULT_PREFERENCES: Preferences = {
   deviceName: 'iPad',
   onboarded: false,
   controlMode: 'direct',
-  stageMode: 'stream',
-  video: DEFAULT_VIDEO_SETTINGS,
-  videoDefaultVersion: VIDEO_DEFAULT_VERSION,
   trackingSpeed: 1,
   scrollSpeed: 1,
   naturalScrolling: true,
   tapToClick: true,
-  // Pinch controls the remote app by default. The former local-only zoom is
-  // still available in Settings for users who need to inspect small UI text.
-  pinchAction: 'zoom-app',
   threeFingerSwipe: 'task-view',
   pencilWindowsInk: true,
   pencilHover: true,
@@ -83,7 +66,6 @@ export const DEFAULT_PREFERENCES: Preferences = {
   autoHideToolbar: true,
   autoProfiles: true,
   showStats: false,
-  showLocalCursor: true,
   toolbar: { edge: 'bottom', offset: 0.5, collapsed: false },
   activeProfileId: 'windows',
   keyboardExtras: [],
@@ -143,42 +125,23 @@ export async function loadPreferences(): Promise<Preferences> {
   return preferencesFrom(stored);
 }
 
-/** Complete preferences from what an earlier version stored, migrating former defaults. */
+/** Complete preferences from what an earlier version stored. */
 export function preferencesFrom(stored: Partial<Preferences> | undefined): Preferences {
-  // Drop the language preference written by earlier versions: Vision-Pro is
-  // intentionally French-only now.
-  const { language: _legacyLanguage, autoHideToolbar: _legacyAutoHide, ...saved } = (stored ?? {}) as Partial<Preferences> & { language?: unknown };
-  const video = { ...DEFAULT_PREFERENCES.video, ...saved.video };
-  // Migrate only exact former defaults, once each. Any combination the user
-  // deliberately changed in the settings panel remains untouched.
-  const version = saved.videoDefaultVersion ?? 0;
-  const legacyAggressiveVideo = version < 3
-    && video.profile === 'max-quality'
-    && video.resolution === '2160p'
-    && video.fps === 'auto'
-    && video.bitrate === 'max'
-    && video.codec === 'auto';
-  const legacyResponsiveVideo = version < 3
-    && video.profile === 'balanced'
-    && video.resolution === 'auto'
-    && video.fps === 'auto'
-    && video.bitrate === 'auto'
-    && video.codec === 'auto';
-  // Version 3 shipped 1080p at 30 FPS; the default is now 60 FPS.
-  const legacyBaseline30 = version < 4
-    && video.profile === 'balanced'
-    && video.resolution === '1080p'
-    && video.fps === 30
-    && video.bitrate === 'auto'
-    && video.codec === 'h264'
-    && video.customWidth === undefined
-    && video.customHeight === undefined
-    && video.customKbps === undefined;
+  // Drop what earlier versions stored and no longer exists: the language (Vision-Pro is
+  // French-only), the screen-streaming options (the iPad is a tablet surface only).
+  const {
+    language: _language,
+    autoHideToolbar: _autoHide,
+    stageMode: _stageMode,
+    video: _video,
+    videoDefaultVersion: _videoVersion,
+    pinchAction: _pinch,
+    showLocalCursor: _cursor,
+    ...saved
+  } = (stored ?? {}) as Partial<Preferences> & Record<'language' | 'stageMode' | 'video' | 'videoDefaultVersion' | 'pinchAction' | 'showLocalCursor', unknown>;
   return {
     ...DEFAULT_PREFERENCES,
     ...saved,
-    video: legacyAggressiveVideo || legacyResponsiveVideo || legacyBaseline30 ? { ...DEFAULT_PREFERENCES.video } : video,
-    videoDefaultVersion: VIDEO_DEFAULT_VERSION,
     toolbar: { ...DEFAULT_PREFERENCES.toolbar, ...saved.toolbar },
     // Session controls always disappear after five seconds. This migration
     // also fixes iPads where an older build persisted the option as disabled.

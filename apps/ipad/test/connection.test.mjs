@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { Connection } from '../src/lib/connection.ts';
-import { detectCodecs, measureRefreshRate } from '../src/lib/platform.ts';
 
 globalThis.window = globalThis;
 globalThis.document = { hidden: true };
@@ -28,29 +27,10 @@ class ClosingSocket {
 }
 globalThis.WebSocket = ClosingSocket;
 
-test('refresh-rate detection is bounded when Safari suspends animation frames', async () => {
-  assert.equal(await measureRefreshRate(), 60);
-  document.hidden = false;
-  globalThis.requestAnimationFrame = () => 1;
-  globalThis.cancelAnimationFrame = () => {};
-  assert.equal(await measureRefreshRate(), 60);
-  document.hidden = true;
-});
-
-test('codec probing cannot hold a connection open indefinitely', async () => {
-  globalThis.RTCRtpReceiver = { getCapabilities: () => ({ codecs: [{ mimeType: 'video/H264' }] }) };
-  navigator.mediaCapabilities = { decodingInfo: () => new Promise(() => {}) };
-  const started = Date.now();
-  assert.deepEqual(await detectCodecs(), [{ codec: 'h264', powerEfficient: true }]);
-  assert.ok(Date.now() - started < 1_200);
-  delete globalThis.RTCRtpReceiver;
-  delete navigator.mediaCapabilities;
-});
-
 test('an authenticated socket close retries and a restored tab retries immediately', async () => {
   const connection = new Connection();
   const count = ClosingSocket.instances.length;
-  await connection.connect({ name: 'PC', mode: 'auth' }, {}, 'iPad', {});
+  await connection.connect({ name: 'PC', mode: 'auth' }, {}, 'iPad');
   await new Promise((resolve) => setTimeout(resolve, 20));
   assert.equal(ClosingSocket.instances.length, count + 1);
   assert.equal(connection.getSnapshot().phase, 'reconnecting');
@@ -66,24 +46,21 @@ test('an authenticated socket close retries and a restored tab retries immediate
 test('explicit disconnect clears transient state and prevents a queued reconnect', async () => {
   const connection = new Connection();
   const count = ClosingSocket.instances.length;
-  await connection.connect({ name: 'PC', mode: 'auth' }, {}, 'iPad', {});
+  await connection.connect({ name: 'PC', mode: 'auth' }, {}, 'iPad');
   await new Promise((resolve) => setTimeout(resolve, 20));
   assert.equal(connection.getSnapshot().phase, 'reconnecting');
 
-  let trackStopped = false;
-  const track = { onended: () => {}, stop() { trackStopped = true; } };
   connection.update({
-    phase: 'streaming',
+    phase: 'connected',
     error: 'stale error',
     sas: '123456',
     pairingExpiresAt: 1,
     session: { sessionId: 'session' },
-    video: { width: 1920, height: 1080 },
     displays: [{ id: 'display' }],
     activeDisplayId: 'display',
     controlAllowed: false,
     activeApp: { exe: 'app.exe', profile: 'test' },
-    stream: { getTracks: () => [track] },
+    stats: { pingMs: 4, inputLatencyMs: 2 },
     connectedAt: 1,
     reconnectAttempt: 3,
     link: 'usb',
@@ -101,19 +78,15 @@ test('explicit disconnect clears transient state and prevents a queued reconnect
   assert.equal(state.sas, null);
   assert.equal(state.pairingExpiresAt, null);
   assert.equal(state.session, null);
-  assert.equal(state.video, null);
   assert.deepEqual(state.displays, []);
   assert.equal(state.activeDisplayId, null);
   assert.equal(state.controlAllowed, true);
   assert.equal(state.activeApp, null);
-  assert.equal(state.stream, null);
   assert.equal(state.connectedAt, null);
   assert.equal(state.reconnectAttempt, 0);
   assert.equal(state.link, null);
   assert.equal(state.switching, false);
   assert.equal(state.stats.pingMs, null);
-  assert.equal(state.stats.agent, null);
-  assert.equal(trackStopped, true, 'disconnect must release the remote media track');
   assert.equal(connection.timers.length, 0);
   assert.equal(connection.reconnectTimer, undefined);
   assert.equal(connection.target, undefined);
@@ -123,35 +96,57 @@ test('explicit disconnect clears transient state and prevents a queued reconnect
 test('a PC-initiated user disconnect clears all session-only state', async () => {
   const connection = new Connection();
   connection.target = { agentId: 'pc-1', name: 'PC', mode: 'auth' };
-  let trackStopped = false;
-  const track = { onended: () => {}, stop() { trackStopped = true; } };
   connection.update({
-    phase: 'streaming',
+    phase: 'connected',
     session: { sessionId: 'session' },
-    video: { width: 1920, height: 1080 },
     displays: [{ id: 'display' }],
     activeDisplayId: 'display',
     activeApp: { exe: 'app.exe', profile: 'test' },
-    stream: { getTracks: () => [track] },
+    stats: { pingMs: 4, inputLatencyMs: 2 },
     connectedAt: 1,
     reconnectAttempt: 2,
     link: 'lan',
   });
   connection.startTimers();
 
-  await connection.onSignalMessage({ t: 'session.end', reason: 'user' });
+  connection.onSignalMessage({ t: 'session.end', reason: 'user' });
 
   const state = connection.getSnapshot();
   assert.equal(state.phase, 'ended');
   assert.equal(state.session, null);
-  assert.equal(state.video, null);
   assert.deepEqual(state.displays, []);
   assert.equal(state.activeApp, null);
-  assert.equal(state.stream, null);
   assert.equal(state.stats.pingMs, null);
   assert.equal(state.link, null);
   assert.equal(connection.timers.length, 0);
   assert.equal(connection.target, undefined);
-  assert.equal(trackStopped, true);
+  connection.reset();
+});
+
+test('hover moves are coalesced and always precede the press that follows them', async () => {
+  const connection = new Connection();
+  const sent = [];
+  let release;
+  const signaling = {
+    open: true,
+    bufferedAmount: 0,
+    send(message) {
+      sent.push(message);
+      // The first encryption is slow: later hover moves pile up meanwhile.
+      return sent.length === 1 ? new Promise((resolve) => { release = resolve; }) : Promise.resolve();
+    },
+    close() {},
+  };
+  connection.signaling = signaling;
+  connection.update({ phase: 'connected' });
+  const bytes = (n) => new Uint8Array([n]).buffer;
+  connection.sendRealtime(bytes(1));
+  connection.sendRealtime(bytes(2));
+  connection.sendRealtime(bytes(3));
+  connection.sendInput(bytes(9));
+  release();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepEqual(sent.map((m) => `${m.t}:${m.d}`), ['rt:AQ', 'rt:Aw', 'in:CQ']);
+  connection.signaling = undefined;
   connection.reset();
 });

@@ -17,8 +17,8 @@ export function ConnectionOverlay() {
     }
   }, [state.phase]);
 
-  // Moving an ongoing session onto a USB cable keeps the picture on screen, without an overlay.
-  if (state.phase === 'idle' || state.phase === 'streaming' || state.switching) return null;
+  // Moving an ongoing session onto a USB cable keeps the surface usable, without an overlay.
+  if (state.phase === 'idle' || state.phase === 'connected' || state.switching) return null;
 
   if (state.phase === 'ended') {
     return null;
@@ -27,14 +27,12 @@ export function ConnectionOverlay() {
   const failed = state.phase === 'failed';
   const pairing = state.phase === 'pairing';
   const title = failed
-    ? 'Connection stopped'
+    ? 'Connexion arrêtée'
     : pairing
-      ? 'Confirm on your PC'
+      ? 'Confirmez sur le PC'
       : state.phase === 'reconnecting'
-        ? 'Reconnecting'
-        : state.phase === 'negotiating'
-          ? 'Starting the display'
-          : 'Connecting securely';
+        ? 'Reconnexion'
+        : 'Connexion sécurisée';
 
   return (
     <div className="overlay" role={failed ? 'alertdialog' : 'dialog'} aria-modal="true" aria-live="polite">
@@ -43,13 +41,13 @@ export function ConnectionOverlay() {
         <h2>{title}</h2>
         {pairing && state.sas ? (
           <>
-            <p>Verify that this code matches the one shown by Vision-Pro on Windows, then approve the request there.</p>
+            <p>Vérifiez que ce code est le même que celui affiché par Vision-Pro sur Windows, puis autorisez la demande sur le PC.</p>
             <div className="sas" aria-label={`Security code ${state.sas}`}>{state.sas}</div>
           </>
         ) : (
-          <p>{failed ? state.error : state.phase === 'reconnecting' ? `Attempt ${state.reconnectAttempt} of 8. Your input is paused until the secure channel returns.` : 'Discovering the fastest private path to your computer.'}</p>
+          <p>{failed ? state.error : state.phase === 'reconnecting' ? `Essai ${state.reconnectAttempt} sur 8. Les commandes reprennent dès que la connexion chiffrée revient.` : 'Recherche du chemin privé le plus rapide vers votre ordinateur.'}</p>
         )}
-        <Button variant={failed ? 'primary' : 'default'} block onClick={close}>{failed ? 'Back to computers' : 'Cancel'}</Button>
+        <Button variant={failed ? 'primary' : 'default'} block onClick={close}>{failed ? 'Retour aux ordinateurs' : 'Annuler'}</Button>
       </div>
     </div>
   );

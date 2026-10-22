@@ -1,10 +1,13 @@
-//! Pairing state: the "Connect Device" window (one-time QR token + 6-digit code) and the single
-//! pending approval shown on the PC. Discovery never implies authorization: every new device
-//! requires an explicit "Allow" on the PC, and code/QR proofs are verified in constant time.
+//! Pairing state: the "Connect Device" window (a 6-digit code shown on the PC) and the single
+//! pending approval shown on the PC for devices that must be confirmed again.
+//!
+//! Discovery never implies authorization: a new device must prove it knows the code currently
+//! displayed on this PC. The proof is a MAC bound to the handshake transcript, verified in
+//! constant time; a code allows five attempts and is replaced after each successful pairing.
 
 use crate::crypto;
 use crate::events::PairingRequestInfo;
-use crate::util::{from_b64u, now_ms, random_code, random_token};
+use crate::util::{from_b64u, now_ms, random_code};
 use parking_lot::Mutex;
 use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
@@ -14,7 +17,6 @@ const MAX_CODE_ATTEMPTS: u32 = 5;
 
 #[derive(Debug, Clone)]
 pub struct ConnectWindow {
-    pub token: String,
     pub code: String,
     pub opened: Instant,
     pub expires_at_ms: u64,
@@ -24,7 +26,6 @@ pub struct ConnectWindow {
 impl ConnectWindow {
     fn fresh() -> Self {
         Self {
-            token: random_token(18),
             code: random_code(),
             opened: Instant::now(),
             expires_at_ms: now_ms() + CONNECT_WINDOW_TTL.as_millis() as u64,
@@ -99,7 +100,7 @@ impl PairingManager {
         guard.clone()
     }
 
-    /// Verifies a QR-token or code proof bound to this handshake transcript.
+    /// Verifies a code proof bound to this handshake transcript.
     pub fn verify_proof(
         &self,
         kind: &str,
@@ -110,43 +111,29 @@ impl PairingManager {
         let Some(window) = guard.as_mut().filter(|w| !w.expired()) else {
             return Err(ProofError::NoWindow);
         };
-        let Some(mac) = from_b64u(mac_b64u, Some(32)) else {
+        let Some(mac) = from_b64u(mac_b64u, Some(32)).filter(|_| kind == "code") else {
             return Err(ProofError::Invalid);
         };
-        match kind {
-            "qr" => {
-                let expected = crypto::pair_proof_mac(&window.token, transcript);
-                if crypto::ct_eq(&mac, &expected) {
-                    Ok("qr")
-                } else {
-                    Err(ProofError::Invalid)
-                }
-            }
-            "code" => {
-                if window.code_attempts >= MAX_CODE_ATTEMPTS {
-                    return Err(ProofError::CodeExhausted);
-                }
-                window.code_attempts += 1;
-                let expected = crypto::pair_proof_mac(&window.code, transcript);
-                if crypto::ct_eq(&mac, &expected) {
-                    Ok("code")
-                } else {
-                    if window.code_attempts >= MAX_CODE_ATTEMPTS {
-                        // Burn the code; the PC shows a new one.
-                        window.code = random_code();
-                        window.code_attempts = 0;
-                        return Err(ProofError::CodeExhausted);
-                    }
-                    Err(ProofError::Invalid)
-                }
-            }
-            _ => Err(ProofError::Invalid),
+        if window.code_attempts >= MAX_CODE_ATTEMPTS {
+            return Err(ProofError::CodeExhausted);
         }
+        window.code_attempts += 1;
+        let expected = crypto::pair_proof_mac(&window.code, transcript);
+        if crypto::ct_eq(&mac, &expected) {
+            return Ok("code");
+        }
+        if window.code_attempts >= MAX_CODE_ATTEMPTS {
+            // Burn the code; the PC shows a new one.
+            window.code = random_code();
+            window.code_attempts = 0;
+            return Err(ProofError::CodeExhausted);
+        }
+        Err(ProofError::Invalid)
     }
 
     /// Registers the single pending approval. A reconnect from the same device
     /// replaces its earlier request, which commonly happens when mobile Safari
-    /// reloads the QR page before the old WebSocket close reaches the PC.
+    /// reloads the page before the old WebSocket close reaches the PC.
     /// Requests from a different device remain serialized.
     pub fn begin(&self, info: PairingRequestInfo) -> Option<oneshot::Receiver<bool>> {
         let mut guard = self.pending.lock();
@@ -196,10 +183,12 @@ impl PairingManager {
             .map(|p| p.info.clone())
     }
 
-    /// Consumes the QR token after a successful pairing so a photographed QR cannot be replayed.
-    pub fn consume_token(&self) {
+    /// Replaces the code after a successful pairing: a code seen over someone's shoulder cannot
+    /// pair a second device. The PC shows the new one.
+    pub fn consume_code(&self) {
         if let Some(window) = self.window.lock().as_mut() {
-            window.token = random_token(18);
+            window.code = random_code();
+            window.code_attempts = 0;
         }
     }
 }
@@ -216,7 +205,7 @@ mod tests {
             device_kind: "tablet".to_string(),
             ip: "192.168.1.5".to_string(),
             sas: "123456".to_string(),
-            method: "qr".to_string(),
+            method: "reconfirm".to_string(),
             created_at: now_ms(),
             expires_at: now_ms() + 60_000,
         }
@@ -240,8 +229,29 @@ mod tests {
         );
         let old = crate::util::b64u(&crypto::pair_proof_mac(&window.code, &transcript));
         assert!(manager.verify_proof("code", &old, &transcript).is_err());
-        let qr = crate::util::b64u(&crypto::pair_proof_mac(&window.token, &transcript));
-        assert_eq!(manager.verify_proof("qr", &qr, &transcript), Ok("qr"));
+        let fresh = manager.window().unwrap();
+        let good = crate::util::b64u(&crypto::pair_proof_mac(&fresh.code, &transcript));
+        assert_eq!(
+            manager.verify_proof("qr", &good, &transcript),
+            Err(ProofError::Invalid),
+            "only code proofs exist"
+        );
+        assert_eq!(manager.verify_proof("code", &good, &transcript), Ok("code"));
+    }
+
+    #[test]
+    fn a_used_code_is_replaced() {
+        let manager = PairingManager::default();
+        let window = manager.open_window();
+        let transcript = [2u8; 32];
+        let proof = crate::util::b64u(&crypto::pair_proof_mac(&window.code, &transcript));
+        assert_eq!(
+            manager.verify_proof("code", &proof, &transcript),
+            Ok("code")
+        );
+        manager.consume_code();
+        assert_ne!(manager.window().unwrap().code, window.code);
+        assert!(manager.verify_proof("code", &proof, &transcript).is_err());
     }
 
     #[test]

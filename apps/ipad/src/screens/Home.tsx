@@ -5,8 +5,8 @@ import { connection } from '../lib/connection.ts';
 import { cableEndpoints, refreshNearby, store, useApp } from '../lib/store.ts';
 import type { KnownComputer } from '../lib/storage.ts';
 import { AddComputerSheet } from './AddComputerSheet.tsx';
+import { CodeEntry } from './CodeEntry.tsx';
 import { DeviceSettingsSheet } from './DeviceSettingsSheet.tsx';
-import { ScanSheet } from './ScanSheet.tsx';
 
 interface ComputerEntry {
   agentId: string;
@@ -62,7 +62,7 @@ export function Home() {
   const agent = useApp((s) => s.agent);
   const nearby = useApp((s) => s.nearby);
   const computers = useApp((s) => s.computers);
-  const [sheet, setSheet] = useState<'add' | 'scan' | 'settings' | null>(null);
+  const [sheet, setSheet] = useState<'add' | 'settings' | null>(null);
   const cable = useCablePaths();
   const toast = useToast();
 
@@ -92,16 +92,26 @@ export function Home() {
     return list;
   }, [agent, nearby, computers, cable]);
 
+  /** First connection to the PC serving this app: the code shown on its screen pairs this iPad. */
+  const pair = (code: string) => {
+    const { identity, prefs } = store.get();
+    if (!identity || !agent) return;
+    void connection.connect(
+      { agentId: agent.agentId, name: agent.name, fingerprint: agent.fingerprint, mode: 'pair', proof: { kind: 'code', secret: code }, ...(cable[agent.agentId] ? { usbUrls: [cable[agent.agentId]!] } : {}) },
+      identity,
+      prefs.deviceName,
+    );
+  };
+
   const connect = (entry: ComputerEntry) => {
     const { identity, prefs } = store.get();
     if (!identity) return;
     if (entry.status === 'usb' && entry.known) {
-      // Signaling, video and input all go through the cable.
+      // The whole session goes through the cable.
       void connection.connect(
         { agentId: entry.agentId, name: entry.name, fingerprint: entry.known.fingerprint, mode: 'auth', usbUrls: [entry.cable!] },
         identity,
         prefs.deviceName,
-        prefs.video,
       );
       return;
     }
@@ -112,7 +122,6 @@ export function Home() {
         { agentId: entry.agentId, name: entry.name, fingerprint: entry.known.fingerprint, mode: 'auth', url: relayUrl },
         identity,
         prefs.deviceName,
-        prefs.video,
       );
       return;
     }
@@ -128,14 +137,11 @@ export function Home() {
       return;
     }
     const known = entry.known;
-    const usbUrls = entry.cable ? [entry.cable] : [];
+    if (!known?.fingerprint) return;
     void connection.connect(
-      known?.fingerprint
-        ? { agentId: entry.agentId, name: entry.name, fingerprint: known.fingerprint, mode: 'auth', usbUrls }
-        : { agentId: entry.agentId, name: entry.name, mode: 'pair', usbUrls, ...(agent?.fingerprint ? { fingerprint: agent.fingerprint } : {}) },
+      { agentId: entry.agentId, name: entry.name, fingerprint: known.fingerprint, mode: 'auth', usbUrls: entry.cable ? [entry.cable] : [] },
       identity,
       prefs.deviceName,
-      prefs.video,
     );
   };
 
@@ -155,22 +161,41 @@ export function Home() {
           </h1>
         </section>
 
+        {agent && !entries[0]?.known && (
+          <section className="pair-card vp-animate-in" aria-labelledby="pair-title">
+            <div className="computer-card-head">
+              <div className="computer-glyph">
+                <Icon name="computer" size={26} />
+              </div>
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <div className="computer-name" id="pair-title">{agent.name}</div>
+                <div className="computer-meta">
+                  <span className="vp-dot" data-tone={agent.pairing?.code ? 'green' : 'orange'} />
+                  {agent.pairing?.code ? 'Code affiché sur le PC' : 'Sur le PC : Vision-Pro → Connecter un appareil'}
+                </div>
+              </div>
+            </div>
+            <p className="pair-help">Entrez le code à 6 chiffres affiché sur l’écran du PC.</p>
+            <CodeEntry onSubmit={pair} autoFocus />
+          </section>
+        )}
+
         <div className="section-header">
-          <h2>Nearby computers</h2>
+          <h2>Ordinateurs</h2>
           <IconButton icon="refresh" label="Refresh" size="sm" onClick={() => void refreshNearby()} />
         </div>
 
-        {entries.length === 0 ? (
+        {entries.filter((entry) => entry.known || entry.status !== 'here').length === 0 ? (
           <div className="empty-state vp-animate-in">
             <Icon name="computer" size={34} />
-            <h3>No computers found</h3>
+            <h3>Aucun ordinateur associé</h3>
             <p style={{ margin: '0 auto', maxWidth: 420, lineHeight: 1.5 }}>
-              Open Vision-Pro on your Windows PC and choose Connect Device, then scan the QR code with this iPad.
+              Sur votre PC Windows, ouvrez Vision-Pro et choisissez « Connecter un appareil ». Ouvrez l’adresse affichée sur cet iPad, puis entrez le code.
             </p>
           </div>
         ) : (
           <div className="computers">
-            {entries.map((entry, index) => (
+            {entries.filter((entry) => entry.known || entry.status !== 'here').map((entry, index) => (
               <article key={entry.agentId} className="computer-card" style={{ animationDelay: `${index * 50}ms` }}>
                 <div className="computer-card-head">
                   <div className="computer-glyph">
@@ -188,7 +213,7 @@ export function Home() {
                       {entry.status === 'here' && !entry.cable && (
                         <>
                           <span className="vp-dot" data-tone="green" />
-                          {entry.known ? 'Ready' : 'Ready to pair'}
+                          Prêt
                         </>
                       )}
                       {entry.status === 'usb' && (
@@ -200,7 +225,7 @@ export function Home() {
                       {entry.status === 'nearby' && (
                         <>
                           <span className="vp-dot" data-tone="green" />
-                          On this network
+                          Sur ce réseau
                         </>
                       )}
                       {entry.status === 'paired' && entry.known?.relayUrl && (
@@ -209,13 +234,13 @@ export function Home() {
                           Via Internet
                         </>
                       )}
-                      {entry.status === 'paired' && !entry.known?.relayUrl && <>Last used {formatRelative(entry.known?.lastConnectedAt)}</>}
+                      {entry.status === 'paired' && !entry.known?.relayUrl && <>Utilisé {formatRelative(entry.known?.lastConnectedAt)}</>}
                     </div>
                   </div>
-                  {entry.cable ? <Badge tone="green" dot>USB</Badge> : entry.known && <Badge>Paired</Badge>}
+                  {entry.cable ? <Badge tone="green" dot>USB</Badge> : entry.known && <Badge>Associé</Badge>}
                 </div>
                 <Button variant={entry.status === 'here' || entry.status === 'usb' || entry.known?.relayUrl ? 'primary' : 'default'} block onClick={() => connect(entry)}>
-                  {entry.status === 'here' || entry.status === 'usb' || (entry.status === 'paired' && entry.known?.relayUrl) ? 'Connect' : 'Open'}
+                  {entry.status === 'here' || entry.status === 'usb' || (entry.status === 'paired' && entry.known?.relayUrl) ? 'Connecter' : 'Ouvrir'}
                 </Button>
               </article>
             ))}
@@ -226,15 +251,8 @@ export function Home() {
           <button type="button" className="action-tile" onClick={() => setSheet('add')}>
             <Icon name="plus" />
             <span>
-              Add computer
-              <small>Enter the code shown on your PC</small>
-            </span>
-          </button>
-          <button type="button" className="action-tile" onClick={() => setSheet('scan')}>
-            <Icon name="qr" />
-            <span>
-              Scan QR Code
-              <small>Pair in one step</small>
+              Autre ordinateur
+              <small>Tapez l’adresse affichée sur cet autre PC</small>
             </span>
           </button>
         </div>
@@ -248,7 +266,6 @@ export function Home() {
       </div>
 
       <AddComputerSheet open={sheet === 'add'} onClose={() => setSheet(null)} />
-      <ScanSheet open={sheet === 'scan'} onClose={() => setSheet(null)} />
       <DeviceSettingsSheet open={sheet === 'settings'} onClose={() => setSheet(null)} />
     </div>
   );

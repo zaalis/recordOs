@@ -1,10 +1,10 @@
 /**
- * Signaling messages. Handshake messages are plaintext (inside TLS); everything after the
- * handshake travels inside `SecureChannel` frames, end-to-end encrypted between iPad and PC,
- * even when relayed by the optional account server.
+ * Session messages. Handshake messages are plaintext (inside TLS); everything after the
+ * handshake — the iPad's input included — travels inside `SecureChannel` frames, end-to-end
+ * encrypted between iPad and PC, even through the Internet relay.
  */
 import { LIMITS, PROTOCOL_VERSION } from './constants.ts';
-import type { AgentCaps, AppliedVideo, ClientCodecSupport, ClientDisplayInfo, DisplayInfo, VideoSettings } from './media.ts';
+import type { AgentCaps, DisplayInfo } from './control.ts';
 import { type Infer, v } from './validate.ts';
 
 export type HandshakeErrorCode =
@@ -16,6 +16,10 @@ export type HandshakeErrorCode =
   | 'bad_signature'
   | 'pairing_disabled'
   | 'pairing_busy'
+  /** The pairing code does not match the one shown on the PC. */
+  | 'bad_code'
+  /** Too many wrong codes: the PC now shows a new one. */
+  | 'code_expired'
   | 'denied'
   | 'expired'
   | 'not_local'
@@ -36,7 +40,8 @@ export interface ServerHello {
   agentName: string;
   agentPub: string;
   commit: string;
-  pairing: { nearby: boolean; code: boolean; qr: boolean };
+  /** `code`: the PC is showing a pairing code ("Connect Device" is open). */
+  pairing: { code: boolean };
 }
 
 export const clientInitSchema = v.object({
@@ -85,8 +90,6 @@ export interface SessionReady {
   link?: SessionLink;
   /** Cable endpoints of this PC right now (a tablet connected by USB can move its session there). */
   usb?: { urls: string[] };
-  /** Relayed sessions only: media must use these TURN servers. */
-  ice?: RelayIceConfig;
 }
 
 export type SessionLink = 'lan' | 'usb' | 'relay';
@@ -137,11 +140,6 @@ export function ipadHotspotUrls(port: number): string[] {
   return [2, 3, 4, 5].map((host) => `wss://172.20.10.${host}:${port}/ws`);
 }
 
-export interface RelayIceConfig {
-  iceServers: { urls: string[]; username: string; credential: string }[];
-  iceTransportPolicy: 'relay';
-}
-
 /** Signaling endpoint of a PC on a relay. Only wss:// (or ws:// on loopback, for tests). */
 export function relayConnectUrl(relayUrl: string, agentId: string): string | null {
   if (!/^[A-Za-z0-9_-]{22}$/.test(agentId)) return null;
@@ -167,12 +165,6 @@ export interface PairResult {
   approved: boolean;
 }
 
-export interface RtcAnswer {
-  t: 'rtc.answer';
-  sdp: string;
-  video: AppliedVideo;
-}
-
 export type SessionEndReason = 'user' | 'revoked' | 'expired' | 'shutdown' | 'replaced' | 'error' | 'stopped' | 'link';
 
 export interface SessionEnd {
@@ -180,7 +172,7 @@ export interface SessionEnd {
   reason: SessionEndReason;
 }
 
-export type ServerSecureMessage = SessionReady | PairPending | PairResult | RtcAnswer | SessionEnd | LinkUsb;
+export type ServerSecureMessage = SessionReady | PairPending | PairResult | SessionEnd | LinkUsb | ControlToClient;
 
 // --- Encrypted: client → server ---------------------------------------------
 
@@ -188,46 +180,12 @@ export const pairRequestSchema = v.object({
   t: v.literal('pair.request'),
   proof: v.optional(
     v.object({
-      kind: v.oneOf(['qr', 'code'] as const),
+      kind: v.literal('code'),
       mac: v.b64u(32),
     }),
   ),
 });
 export type PairRequest = Infer<typeof pairRequestSchema>;
-
-const videoSettingsSchema = v.object({
-  profile: v.oneOf(['balanced', 'low-latency', 'max-quality', 'battery-saver'] as const),
-  resolution: v.oneOf(['auto', '720p', '1080p', '1440p', '2160p', '4320p', 'native', 'custom'] as const),
-  customWidth: v.optional(v.number({ min: 320, max: 7680, integer: true })),
-  customHeight: v.optional(v.number({ min: 240, max: 4320, integer: true })),
-  fps: v.union<VideoSettings['fps']>(v.literal('auto'), v.oneOf([30, 60, 90, 120] as const)),
-  bitrate: v.oneOf(['auto', 'low', 'medium', 'high', 'max', 'custom'] as const),
-  customKbps: v.optional(v.number({ min: 500, max: 200_000, integer: true })),
-  codec: v.oneOf(['auto', 'h264', 'hevc', 'av1'] as const),
-});
-export { videoSettingsSchema };
-
-export const rtcOfferSchema = v.object({
-  t: v.literal('rtc.offer'),
-  sdp: v.string({ min: 10, max: 48_000 }),
-  video: videoSettingsSchema,
-  display: v.object({
-    width: v.number({ min: 100, max: 8192, integer: true }),
-    height: v.number({ min: 100, max: 8192, integer: true }),
-    refreshHz: v.number({ min: 24, max: 240 }),
-  }),
-  codecs: v.array(
-    v.object({
-      codec: v.oneOf(['h264', 'hevc', 'av1'] as const),
-      powerEfficient: v.boolean(),
-    }),
-    8,
-  ),
-});
-export type RtcOffer = Infer<typeof rtcOfferSchema> & {
-  display: ClientDisplayInfo;
-  codecs: ClientCodecSupport[];
-};
 
 export const sessionCloseSchema = v.object({ t: v.literal('session.close') });
 
@@ -239,43 +197,27 @@ export const deviceRotateSchema = v.object({
 
 export type ClientSecureMessage =
   | PairRequest
-  | RtcOffer
+  | ControlToAgent
   | Infer<typeof sessionCloseSchema>
   | Infer<typeof deviceRotateSchema>;
 
-// --- Control data channel (JSON, DTLS-protected) ------------------------------
+// --- Session control (encrypted channel) -----------------------------------
 
 export type ControlToAgent =
-  | { t: 'ping'; id: number; t0: number }
-  | { t: 'video.settings'; video: VideoSettings }
+  /** Reliable, ordered input: one binary input event (see input.ts), base64url. */
+  | { t: 'in'; d: string }
+  /** Latest-wins input (hover moves): the PC drops an event older than the last one it applied. */
+  | { t: 'rt'; d: string }
+  /** `rttMs`: round trip measured on the previous ping, shown on the PC. */
+  | { t: 'ping'; id: number; t0: number; rttMs?: number }
   | { t: 'display.select'; displayId: string }
-  | { t: 'keyframe' }
-  | { t: 'app.watch'; enabled: boolean }
-  /** What this iPad's video receiver measures (cumulative counters since the stream started). */
-  | {
-      t: 'client.stats';
-      decodedFps: number;
-      keyFrames: number;
-      pli: number;
-      nack: number;
-      packetsLost: number;
-      framesDropped: number;
-      freezes: number;
-      jitterBufferMs: number;
-      decodeMs: number;
-      jitterMs: number;
-      codec: string;
-    };
+  | { t: 'app.watch'; enabled: boolean };
 
-export type AppProfileId = 'blender' | 'maya' | 'photoshop';
+export type AppProfileId = 'blender' | 'maya' | 'zbrush' | 'houdini' | 'photoshop';
 
 export type ControlToClient =
-  /** `rtp`: the PC's RTP video clock (90 kHz, 32-bit) when it answered; absent on older PCs. */
-  | { t: 'pong'; id: number; t0: number; agentMs: number; rtp?: number }
-  | { t: 'stats'; stats: import('./media.ts').AgentStats }
-  | { t: 'cursor.shape'; id: number; width: number; height: number; hotX: number; hotY: number; png: string }
+  | { t: 'pong'; id: number; t0: number; agentMs: number }
   | { t: 'app.active'; exe: string; profile: AppProfileId | null }
   | { t: 'displays'; displays: DisplayInfo[]; activeId: string }
-  | { t: 'video.applied'; video: AppliedVideo }
-  | { t: 'video.renegotiate'; reason: string }
-  | { t: 'permission'; control: boolean };
+  | { t: 'session.permission'; control: boolean }
+  | { t: 'device.rotated'; deviceId: string };

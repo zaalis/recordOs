@@ -4,12 +4,12 @@
 
 pub mod agent;
 pub mod config;
+pub mod control;
 pub mod crypto;
 pub mod discovery;
 pub mod events;
 pub mod identity;
 pub mod input;
-pub mod media;
 pub mod net;
 pub mod pairing;
 pub mod paths;

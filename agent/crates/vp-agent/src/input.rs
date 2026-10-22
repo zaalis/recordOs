@@ -12,7 +12,6 @@ pub const KIND_PEN: u8 = 0x07;
 pub const KIND_TOUCH: u8 = 0x08;
 pub const KIND_COMBO: u8 = 0x09;
 pub const KIND_RELEASE_ALL: u8 = 0x0a;
-pub const KIND_CURSOR: u8 = 0x40;
 
 pub const EXTENDED: u16 = 0x100;
 pub const MAX_TEXT_UNITS: usize = 256;
@@ -334,19 +333,7 @@ pub fn decode(data: &[u8]) -> Option<(u16, InputEvent)> {
     Some((seq, event))
 }
 
-/// Encodes a cursor update for the realtime channel (agent → iPad).
-pub fn encode_cursor(x: f32, y: f32, shape_id: u32, visible: bool, seq: u16) -> [u8; 20] {
-    let mut out = [0u8; 20];
-    out[0] = KIND_CURSOR;
-    out[2..4].copy_from_slice(&seq.to_le_bytes());
-    out[4..8].copy_from_slice(&x.to_le_bytes());
-    out[8..12].copy_from_slice(&y.to_le_bytes());
-    out[12..16].copy_from_slice(&shape_id.to_le_bytes());
-    out[16] = visible as u8;
-    out
-}
-
-/// Tracks sequence numbers on the unordered channel so stale moves are discarded.
+/// Tracks sequence numbers of latest-wins (realtime) input so stale moves are discarded.
 #[derive(Default)]
 pub struct SequenceFilter {
     last: Option<u16>,

@@ -5,7 +5,6 @@ import {
   InputEncoder,
   SecureChannel,
   b64u,
-  buildPairingFragment,
   computeCommit,
   computeTranscript,
   deriveSessionKeys,
@@ -13,7 +12,7 @@ import {
   generateDeviceIdentity,
   idFromPublicKey,
   fingerprintOf,
-  parsePairingFragment,
+  pairRequestSchema,
   randomBytes,
   sasFromBytes,
   signEcdsa,
@@ -127,10 +126,10 @@ test('input encoder layouts', () => {
   assert.equal(view.getFloat32(8, true), 0);
 });
 
-test('pairing links', () => {
-  const link = { agentId: 'A'.repeat(22), fingerprint: 'B'.repeat(43), token: 'C'.repeat(22), name: "Bryan's PC" };
-  assert.deepEqual(parsePairingFragment(buildPairingFragment(link)), link);
-  assert.equal(parsePairingFragment('#/pair?a=short'), null);
+test('pairing requests carry a code proof only', () => {
+  const mac = b64u(new Uint8Array(32));
+  assert.deepEqual(parse(pairRequestSchema, { t: 'pair.request', proof: { kind: 'code', mac } }), { t: 'pair.request', proof: { kind: 'code', mac } });
+  assert.throws(() => parse(pairRequestSchema, { t: 'pair.request', proof: { kind: 'qr', mac } }));
 });
 
 test('creative application profiles resolve from foreground executable names', () => {

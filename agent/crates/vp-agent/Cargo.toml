@@ -1,6 +1,6 @@
 [package]
 name = "vp-agent"
-description = "Vision-Pro Windows agent core: security, pairing, signaling, capture, encoding, WebRTC and input."
+description = "Vision-Pro Windows agent core: security, pairing, encrypted sessions and input."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -50,16 +50,12 @@ rand = "0.8"
 zeroize = "1"
 subtle = "2"
 base64 = "0.22"
-str0m = { version = "0.23.1", default-features = false, features = ["rust-crypto"] }
 mdns-sd = "0.13"
 if-addrs = "0.13"
 gethostname = "1"
-qrcode = { version = "0.14", default-features = false, features = ["svg"] }
-png = "0.17"
 uuid = { version = "1", features = ["v4"] }
 mime_guess = "2"
 rust-embed = { version = "8", features = ["include-exclude"] }
-openh264 = "0.9"
 
 [dev-dependencies]
 vp-relay = { path = "../vp-relay" }
@@ -69,12 +65,9 @@ windows = { version = "0.62", features = [
   "Win32_Devices_DeviceAndDriverInstallation",
   "Win32_Devices_Display",
   "Win32_Foundation",
-  "Win32_Graphics_Direct3D",
-  "Win32_Graphics_Direct3D11",
   "Win32_Graphics_Dxgi",
   "Win32_Graphics_Dxgi_Common",
   "Win32_Graphics_Gdi",
-  "Win32_Media_MediaFoundation",
   "Win32_NetworkManagement_IpHelper",
   "Win32_NetworkManagement_Ndis",
   "Win32_NetworkManagement_WindowsFirewall",
@@ -84,7 +77,6 @@ windows = { version = "0.62", features = [
   "Win32_Security_Cryptography",
   "Win32_System_Com",
   "Win32_System_Com_StructuredStorage",
-  "Win32_System_Memory",
   "Win32_System_Ole",
   "Win32_System_Power",
   "Win32_System_ProcessStatus",

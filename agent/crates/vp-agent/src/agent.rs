@@ -1,10 +1,10 @@
 //! Agent facade used by the desktop UI: service lifecycle, pairing, devices, sessions, settings.
 
 use crate::config::Settings;
+use crate::control::ControlEngine;
 use crate::discovery::{Discovery, NearbyAgent};
 use crate::events::{AgentEvent, PairingRequestInfo};
 use crate::identity::AgentIdentity;
-use crate::media::MediaEngine;
 use crate::pairing::PairingManager;
 use crate::protocol::AgentCaps;
 use crate::relay::{RelayHub, RelayStatus};
@@ -31,7 +31,7 @@ pub struct Core {
     pub pairing: PairingManager,
     pub sessions: SessionRegistry,
     pub events: broadcast::Sender<AgentEvent>,
-    pub media: Arc<dyn MediaEngine>,
+    pub control: Arc<dyn ControlEngine>,
     pub hostname: String,
     pub handshake_slots: Arc<Semaphore>,
     pub authority: RwLock<Option<Arc<LocalAuthority>>>,
@@ -78,6 +78,7 @@ pub struct StatusSnapshot {
     pub computer_name: String,
     pub agent_id: String,
     pub fingerprint: String,
+    pub full_fingerprint: String,
     pub hostname: String,
     pub port: u16,
     pub addresses: Vec<String>,
@@ -93,17 +94,34 @@ pub struct StatusSnapshot {
     pub usb: crate::usb::UsbStatus,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ConnectNetwork {
+    /// Same Wi-Fi or Ethernet network as this PC.
+    Lan,
+    /// The private Tailscale network: works from anywhere once the iPad is on it.
+    Tailscale,
+}
+
+/// An address to type on the iPad. It opens the setup page, which installs this PC's trust
+/// profile the first time and then continues to the Vision-Pro app.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectAddress {
+    pub network: ConnectNetwork,
+    pub url: String,
+    /// The app itself, for an iPad that already trusts this PC.
+    pub app_url: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectInfo {
-    pub url: String,
-    pub qr_svg: String,
     pub code: String,
     pub expires_at: u64,
     pub computer_name: String,
     pub fingerprint: String,
-    pub setup_url: Option<String>,
-    pub setup_qr_svg: Option<String>,
+    pub addresses: Vec<ConnectAddress>,
     pub authority_fingerprint: String,
 }
 
@@ -125,7 +143,7 @@ pub struct Agent {
 }
 
 impl Agent {
-    pub fn new(media: Arc<dyn MediaEngine>) -> anyhow::Result<Agent> {
+    pub fn new(control: Arc<dyn ControlEngine>) -> anyhow::Result<Agent> {
         crate::paths::ensure_data_dir()?;
         let settings = Settings::load();
         let identity = Arc::new(AgentIdentity::load_or_create()?);
@@ -156,7 +174,7 @@ impl Agent {
             pairing: PairingManager::default(),
             sessions: SessionRegistry::default(),
             events,
-            media,
+            control,
             hostname,
             handshake_slots: Arc::new(Semaphore::new(16)),
             authority: RwLock::new(None),
@@ -215,10 +233,7 @@ impl Agent {
             Some(a) => a,
             None => Arc::new(LocalAuthority::load_or_create(&name)?),
         };
-        let ips: Vec<Ipv4Addr> = crate::net::lan_interfaces()
-            .into_iter()
-            .map(|i| i.ip)
-            .collect();
+        let ips = certificate_addresses();
         let hostnames = vec![
             core.hostname.clone(),
             format!("{}.local", crate::net::system_hostname().to_lowercase()),
@@ -246,7 +261,7 @@ impl Agent {
                     &identity.agent_id,
                     &settings.computer_name,
                     &core.hostname,
-                    &core.cert_ips.read(),
+                    &lan_addresses(),
                     settings.network.https_port,
                     core.nearby.clone(),
                 )
@@ -357,6 +372,7 @@ impl Agent {
             computer_name: settings.computer_name.clone(),
             agent_id: identity.agent_id.clone(),
             fingerprint: crate::crypto::format_fingerprint(identity.public_raw()),
+            full_fingerprint: crate::crypto::fingerprint_of(identity.public_raw()),
             hostname: self.core.hostname.clone(),
             port,
             addresses,
@@ -365,7 +381,7 @@ impl Agent {
             sessions: self.core.sessions.snapshot(),
             pending_pairing: self.core.pairing.pending(),
             connect_window_open: self.core.pairing.window().is_some(),
-            caps: self.core.media.capabilities(),
+            caps: self.core.control.capabilities(),
             locked_sources: self.core.guard.locked_sources().len(),
             store_integrity_warning: self.core.devices.read().integrity_warning,
             version: crate::VERSION.to_string(),
@@ -426,11 +442,14 @@ impl Agent {
 
     // --- Pairing ----------------------------------------------------------------
 
+    /// Opens "Connect Device" (or returns what it shows). Observers are told only when the window
+    /// opens or gets a new code, so the UI can call this again on every agent event.
     pub fn open_connect_window(&self, refresh: bool) -> anyhow::Result<ConnectInfo> {
         anyhow::ensure!(
             self.is_running(),
             "Start Vision-Pro before connecting a device."
         );
+        let previous = self.core.pairing.window().map(|w| w.code);
         let window = if refresh {
             self.core.pairing.refresh_window()
         } else {
@@ -462,37 +481,37 @@ impl Agent {
         };
         let settings = self.core.settings.read().clone();
         let identity = self.core.identity.read().clone();
-        let fragment = format!(
-            "#/pair?a={}&fp={}&t={}&n={}",
-            identity.agent_id,
-            identity.fingerprint,
-            window.token,
-            url_encode(&settings.computer_name)
-        );
-        // Do not fall back to the mDNS `.local` hostname for a QR. Some iPads
-        // resolve it to their own 127.0.0.1, which makes an otherwise valid QR
-        // look like a refused connection. The certificate includes LAN IPs.
-        let lan_ip = crate::net::primary_lan_ip();
-        let connection_host = lan_ip
-            .map(|ip| ip.to_string())
-            .unwrap_or_else(|| self.core.hostname.clone());
-        let url = format!(
-            "https://{connection_host}:{}/{}",
-            settings.network.https_port, fragment
-        );
-        let setup_url = bootstrap_port
-            .zip(lan_ip)
-            .map(|(port, ip)| format!("http://{ip}:{port}/{fragment}"));
-        let _ = self.core.events.send(AgentEvent::ConnectWindowChanged);
+        // Concrete addresses, not the mDNS `.local` hostname: some iPads resolve it to their own
+        // 127.0.0.1. The certificate covers every one of them.
+        let port = settings.network.https_port;
+        let lan = crate::net::primary_lan_ip().map(|ip| (ConnectNetwork::Lan, ip));
+        let tailscale = crate::net::overlay_addresses()
+            .into_iter()
+            .next()
+            .map(|ip| (ConnectNetwork::Tailscale, ip));
+        let addresses = lan
+            .into_iter()
+            .chain(tailscale)
+            .map(|(network, ip)| {
+                let app_url = format!("https://{ip}:{port}/");
+                ConnectAddress {
+                    network,
+                    url: bootstrap_port
+                        .map(|setup| format!("http://{ip}:{setup}"))
+                        .unwrap_or_else(|| app_url.clone()),
+                    app_url,
+                }
+            })
+            .collect();
+        if previous.as_deref() != Some(window.code.as_str()) {
+            let _ = self.core.events.send(AgentEvent::ConnectWindowChanged);
+        }
         Ok(ConnectInfo {
-            qr_svg: qr_svg(&url)?,
-            setup_qr_svg: setup_url.as_deref().map(qr_svg).transpose()?,
-            url,
-            setup_url,
             code: window.code,
             expires_at: window.expires_at_ms,
             computer_name: settings.computer_name,
             fingerprint: crate::crypto::format_fingerprint(identity.public_raw()),
+            addresses,
             authority_fingerprint: self
                 .core
                 .authority
@@ -501,6 +520,11 @@ impl Agent {
                 .map(|a| a.fingerprint_sha256())
                 .unwrap_or_default(),
         })
+    }
+
+    /// The code "Connect Device" shows right now, if its window is open.
+    pub fn connect_code(&self) -> Option<String> {
+        self.core.pairing.window().map(|window| window.code)
     }
 
     pub fn close_connect_window(&self) {
@@ -831,10 +855,7 @@ async fn maintenance_loop(core: Arc<Core>) {
 /// iPad can reach the PC right after a DHCP renewal, a Wi-Fi switch or a cable being plugged in.
 pub(crate) fn refresh_network(core: &Core) {
     let _serialized = core.network_refresh.lock();
-    let ips: Vec<Ipv4Addr> = crate::net::lan_interfaces()
-        .into_iter()
-        .map(|i| i.ip)
-        .collect();
+    let ips = certificate_addresses();
     if *core.cert_ips.read() == ips {
         return;
     }
@@ -843,32 +864,22 @@ pub(crate) fn refresh_network(core: &Core) {
         return;
     }
     if let Some(discovery) = core.discovery.read().clone() {
-        discovery.set_addresses(&ips);
+        discovery.set_addresses(&lan_addresses());
     }
     tracing::info!(addresses = ?ips, "local addresses changed");
     let _ = core.events.send(AgentEvent::NetworkChanged);
 }
 
-fn qr_svg(data: &str) -> anyhow::Result<String> {
-    use qrcode::render::svg;
-    let code = qrcode::QrCode::with_error_correction_level(data.as_bytes(), qrcode::EcLevel::M)?;
-    Ok(code
-        .render::<svg::Color>()
-        .min_dimensions(256, 256)
-        .quiet_zone(true)
-        .dark_color(svg::Color("#000000"))
-        .light_color(svg::Color("#ffffff"))
-        .build())
+fn lan_addresses() -> Vec<Ipv4Addr> {
+    crate::net::lan_interfaces()
+        .into_iter()
+        .map(|i| i.ip)
+        .collect()
 }
 
-fn url_encode(value: &str) -> String {
-    value
-        .bytes()
-        .map(|b| match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                (b as char).to_string()
-            }
-            _ => format!("%{b:02X}"),
-        })
-        .collect()
+/// Addresses the iPad may use to reach this PC: the local network, then Tailscale.
+fn certificate_addresses() -> Vec<Ipv4Addr> {
+    let mut ips = lan_addresses();
+    ips.extend(crate::net::overlay_addresses());
+    ips
 }

@@ -9,11 +9,11 @@
 
 ## Implemented controls
 
-- Local-first networking and no unnecessary cloud video path
-- Time-limited QR/code pairing with explicit PC approval and matching short authentication string
+- Local-first networking; nothing is captured or streamed from the PC (the iPad only sends input)
+- Pairing only with the 6-digit code shown on the PC (5-minute window, five attempts, replaced after each successful pairing); the proof is an HMAC bound to the handshake transcript, so it cannot be relayed to another session. A valid code is the PC user's consent: the device is paired without a second prompt. Devices marked untrusted (or "confirm every connection") still need **Allow** on the PC with a matching short authentication string
 - Public-key device identity, signed challenges, ephemeral session material and replay tracking
-- DTLS/SRTP WebRTC transport and typed data channels
-- Strict message shape, size, enum, coordinate, bitrate, resolution and FPS validation
+- All input travels inside the end-to-end encrypted session channel (AES-256-GCM, strict sequence numbers, ratcheting rekey) on top of TLS 1.3
+- Strict message shape, size, enum, coordinate and input-rate validation
 - Per-device view/control authorization, trust expiry, attempt lockout, audit history and immediate revocation
 - No browser-accessible arbitrary shell command
 - Emergency global shortcut: `Ctrl+Alt+Shift+Backspace`
@@ -22,13 +22,14 @@
 - CSP, clickjacking, MIME-sniffing, referrer and permissions headers
 - Bounded request bodies and account rate limiting
 - Relay: challenge-signed agent registration, optional access token, one-time accept tickets, per-source rate limits
-- Relay: TURN credentials delivered only inside the encrypted channel and restricted to the PC's leased virtual address; code-less pairing refused over the Internet
-- USB Direct: cable endpoints are announced only inside the encrypted channel or on the local `/api/info`; the iPad accepts only `wss://` to private IPv4 addresses and probes the pinned PC identity before use; the same authentication, pairing and DTLS-SRTP apply over the cable
+- Relay: only a splice of the encrypted session; pairing through it always requires the code
+- Tailscale: in Local Only mode, peers in 100.64.0.0/10 are accepted only while this PC itself has such an address (it is on a Tailscale network); they then go through the same pairing and authentication. The local authority's name constraints permit that range (authority version 2)
+- USB Direct: cable endpoints are announced only inside the encrypted channel or on the local `/api/info`; the iPad accepts only `wss://` to private IPv4 addresses and probes the pinned PC identity before use; the same authentication, pairing and encryption apply over the cable
 - USB Direct: the Windows network/firewall change for a cable interface requires explicit UAC consent and is scoped to the Vision-Pro program on that interface
 
 ## Secrets and local state
 
-Agent state is stored below `%APPDATA%\Vision-Pro`. Do not publish this directory, account data, private keys, QR secrets, logs containing identifiers, or `.env` files. Production account data should live outside the source checkout with filesystem permissions limited to the service identity.
+Agent state is stored below `%APPDATA%\Vision-Pro`. Do not publish this directory, account data, private keys, pairing codes, logs containing identifiers, or `.env` files. Production account data should live outside the source checkout with filesystem permissions limited to the service identity.
 
 ## Deployment requirements
 

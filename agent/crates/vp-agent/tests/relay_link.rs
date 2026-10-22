@@ -1,10 +1,10 @@
-//! The real agent against the real relay: registration, access token, credentials and reconnection.
+//! The real agent against the real relay: registration, access token and reconnection.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use vp_agent::agent::Agent;
 use vp_agent::config::NetworkMode;
-use vp_agent::media::engine::NullMediaEngine;
+use vp_agent::control::NullControlEngine;
 use vp_agent::relay::RelayState;
 use vp_relay::{RelayConfig, RunningRelay};
 
@@ -51,14 +51,14 @@ fn configure(agent: &Agent, relay: &RunningRelay, token: &str) {
 }
 
 #[test]
-fn agent_registers_reconnects_and_obtains_media_credentials() {
+fn agent_registers_and_reconnects() {
     let home = std::env::temp_dir().join(format!("vp-relay-link-{}", std::process::id()));
     std::env::set_var("VISION_PRO_HOME", &home);
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let relay = runtime.block_on(start_relay("127.0.0.1:0", "127.0.0.1:0"));
     let http_addr = relay.http_addr;
 
-    let agent = Arc::new(Agent::new(Arc::new(NullMediaEngine)).unwrap());
+    let agent = Arc::new(Agent::new(Arc::new(NullControlEngine)).unwrap());
     configure(&agent, &relay, "wrong-token-000000000");
     agent.start_service().unwrap();
     let refused = wait_for(&agent, RelayState::Error, Duration::from_secs(10));
@@ -74,20 +74,8 @@ fn agent_registers_reconnects_and_obtains_media_credentials() {
         Some(format!("ws://{http_addr}").as_str())
     );
     assert!(relay.relay.hub.is_online(&agent.status().agent_id));
-    // UDP media tunnel is acknowledged shortly after registration.
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !agent.status().relay.udp {
-        assert!(Instant::now() < deadline, "UDP tunnel was not established");
-        std::thread::sleep(Duration::from_millis(50));
-    }
 
     let core = agent.core().clone();
-    let credential = runtime.block_on(core.relay.issue(600)).unwrap();
-    assert!(credential
-        .urls
-        .iter()
-        .any(|u| u.starts_with("turn:127.0.0.1:")));
-    assert_eq!(credential.peer.ip().octets()[0], 100);
     assert_eq!(
         core.relay.public_url().as_deref(),
         Some(format!("ws://{http_addr}").as_str())

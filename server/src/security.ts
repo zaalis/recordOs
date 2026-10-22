@@ -17,6 +17,13 @@ export class RateGuard {
   private readonly lockMs: number;
   constructor(max: number, windowMs: number, lockMs: number) { this.max = max; this.windowMs = windowMs; this.lockMs = lockMs; }
   check(key: string, now = Date.now()): number {
+    // Bound attacker-controlled keys. Reclaim inactive buckets before refusing new ones.
+    if (this.buckets.size >= 10_000) {
+      for (const [id, entry] of this.buckets) {
+        if (entry.lockedUntil <= now && (entry.attempts.at(-1) ?? 0) <= now - this.windowMs) this.buckets.delete(id);
+      }
+      if (!this.buckets.has(key) && this.buckets.size >= 10_000) return this.lockMs;
+    }
     const bucket = this.buckets.get(key);
     if (!bucket) return 0;
     if (bucket.lockedUntil > now) return bucket.lockedUntil - now;

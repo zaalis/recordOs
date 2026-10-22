@@ -1,5 +1,5 @@
-/** Runtime environment: the agent serving this app, device traits and media capabilities. */
-import type { ClientCodecSupport, CodecId, DeviceKind } from '@vision-pro/protocol';
+/** Runtime environment: the agent serving this app, device traits and fullscreen. */
+import type { DeviceKind } from '@vision-pro/protocol';
 
 export interface AgentInfo {
   product: string;
@@ -9,7 +9,8 @@ export interface AgentInfo {
   fingerprint: string;
   hostname: string;
   port: number;
-  pairing: { nearby: boolean };
+  /** `code`: the PC is showing a pairing code right now. */
+  pairing: { code: boolean };
   /** Cable endpoints of the PC right now (a tablet connected by USB). */
   usb?: { urls: string[] };
 }
@@ -49,94 +50,11 @@ export function signalingUrl(): string {
   return `${scheme}://${location.host}/ws`;
 }
 
-export function isSecure(): boolean {
-  return window.isSecureContext && !!globalThis.crypto?.subtle;
-}
-
 export function deviceKind(): DeviceKind {
   const ua = navigator.userAgent;
   if (/iPad/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1)) return 'ipad';
   if (navigator.maxTouchPoints > 1) return 'tablet';
   return 'browser';
-}
-
-export function isStandalone(): boolean {
-  return window.matchMedia('(display-mode: standalone), (display-mode: fullscreen)').matches || (navigator as { standalone?: boolean }).standalone === true;
-}
-
-const CODEC_MIME: Record<CodecId, string> = { h264: 'video/H264', hevc: 'video/H265', av1: 'video/AV1' };
-
-export async function detectCodecs(): Promise<ClientCodecSupport[]> {
-  const capabilities = typeof RTCRtpReceiver !== 'undefined' ? RTCRtpReceiver.getCapabilities?.('video') : null;
-  const mimes = new Set((capabilities?.codecs ?? []).map((c) => c.mimeType.toLowerCase()));
-  const results: ClientCodecSupport[] = [];
-  for (const codec of Object.keys(CODEC_MIME) as CodecId[]) {
-    const mime = CODEC_MIME[codec];
-    if (!mimes.has(mime.toLowerCase())) continue;
-    // Ask iPadOS about the demanding case we use by default. This does not
-    // install a Windows driver: Safari/iPadOS owns the decoder. It lets the PC
-    // prefer a genuinely hardware-decoded 4K codec and safely fall back.
-    let powerEfficient = true;
-    try {
-      const query = navigator.mediaCapabilities?.decodingInfo({
-        type: 'webrtc',
-        video: { contentType: mime, width: 3840, height: 2160, bitrate: 200_000_000, framerate: 60 },
-      } as MediaDecodingConfiguration);
-      let timeout = 0;
-      const info = query && await Promise.race([
-        query,
-        new Promise<undefined>((resolve) => { timeout = window.setTimeout(() => resolve(undefined), 500); }),
-      ]).finally(() => window.clearTimeout(timeout));
-      if (info) powerEfficient = info.supported && info.powerEfficient;
-    } catch {
-      // Some iPadOS versions do not expose a 4K WebRTC query. SDP negotiation
-      // remains the authoritative compatibility check in that case.
-    }
-    results.push({ codec, powerEfficient });
-  }
-  return results;
-}
-
-/** Measures the display refresh rate from requestAnimationFrame timing (60 or 120 on ProMotion). */
-export function measureRefreshRate(samples = 40): Promise<number> {
-  return new Promise((resolve) => {
-    if (document.hidden) { resolve(60); return; }
-    const deltas: number[] = [];
-    let last = 0;
-    let frame = 0;
-    let done = false;
-    const finish = (hz: number) => {
-      if (done) return;
-      done = true;
-      window.clearTimeout(timeout);
-      cancelAnimationFrame(frame);
-      resolve(hz);
-    };
-    // Safari can suspend animation frames while a tab is being restored.
-    // A missing sample must never block the connection itself.
-    const timeout = window.setTimeout(() => finish(60), 1_500);
-    const step = (t: number) => {
-      if (done) return;
-      if (last) deltas.push(t - last);
-      last = t;
-      if (deltas.length < samples) frame = requestAnimationFrame(step);
-      else {
-        deltas.sort((a, b) => a - b);
-        const median = deltas[Math.floor(deltas.length / 2)] ?? 16.7;
-        const hz = 1000 / median;
-        finish(hz > 100 ? 120 : hz > 80 ? 90 : 60);
-      }
-    };
-    frame = requestAnimationFrame(step);
-  });
-}
-
-export function physicalViewport(): { width: number; height: number } {
-  const dpr = Math.min(window.devicePixelRatio || 1, 3);
-  return {
-    width: Math.round(Math.max(100, window.innerWidth * dpr)),
-    height: Math.round(Math.max(100, window.innerHeight * dpr)),
-  };
 }
 
 export async function toggleFullscreen(): Promise<boolean> {
@@ -161,9 +79,4 @@ export async function toggleFullscreen(): Promise<boolean> {
 export function isFullscreenActive(): boolean {
   const doc = document as Document & { webkitFullscreenElement?: Element };
   return Boolean(doc.fullscreenElement || doc.webkitFullscreenElement);
-}
-
-export function fullscreenSupported(): boolean {
-  const root = document.documentElement as HTMLElement & { webkitRequestFullscreen?: unknown };
-  return typeof root.requestFullscreen === 'function' || typeof root.webkitRequestFullscreen === 'function';
 }

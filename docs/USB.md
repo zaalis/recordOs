@@ -1,7 +1,7 @@
 # USB Direct
 
 Plug the tablet into the PC with a cable (USB-C, or Lightning to USB-A) and the whole session —
-signaling, video, cursor and input — travels over that cable. No router or Wi-Fi network is
+handshake, Pencil, touch and keyboard input — travels over that cable. No router or Wi-Fi network is
 needed. Sessions keep the same protocol, the same end-to-end encryption and the same pairing.
 
 ## How it works
@@ -19,8 +19,7 @@ On Windows the iPad needs Apple's USB drivers: install **Apple Devices** from th
 
 ```text
 iPad ══ USB cable ══ PC            (172.20.10.1 ⇄ 172.20.10.2, private /28 created by the iPad)
-  wss://172.20.10.2:47800/ws  signaling (TLS 1.3 + end-to-end encrypted channel)
-  DTLS/SRTP on 172.20.10.2    video, cursor and input (only ICE candidate offered)
+  wss://172.20.10.2:47800/ws  session: TLS 1.3 + end-to-end encrypted channel carrying the input
 ```
 
 ### On the PC (`agent/crates/vp-agent/src/usb.rs`, `platform/usb.rs`)
@@ -34,9 +33,8 @@ iPad ══ USB cable ══ PC            (172.20.10.1 ⇄ 172.20.10.2, private
    IPv4 address: these are cable links.
 4. On any address change it reissues the TLS certificate (the cable address is in its SAN) and
    re-announces mDNS with the new addresses — before any iPad is told about the cable.
-5. A session whose TCP connection arrived on a cable address is a **USB session**: the WebRTC
-   answer offers the cable address as its only ICE candidate, so media cannot take another path.
-   Local-network sessions never offer cable addresses.
+5. A session whose TCP connection arrived on a cable address is a **USB session**. Its input
+   travels inside that one connection, so it cannot take another path.
 6. When a cable link appears, every local-network session receives `link.usb` with the cable
    endpoints. When it disappears, its sessions end at once with reason `link`.
 
@@ -46,12 +44,10 @@ iPad ══ USB cable ══ PC            (172.20.10.1 ⇄ 172.20.10.2, private
   `usb.urls`) and probes them: a WebSocket that must answer with the pinned PC's `hello`. Only the
   tablet at the other end of the cable can reach that address, so a successful probe means "this
   iPad is the one plugged in". The session then opens on the cable; otherwise on Wi-Fi.
-- `link.usb` during a Wi-Fi session: the app probes the cable and moves the whole session onto it.
-  The last picture stays on screen until the first cable frame (measured: no black frame, live
-  video again after about 1 s).
-- Cable unplugged: the session end (`link`), a closed socket or an ICE disconnection (1.2 s grace
-  on a cable, 4 s on Wi-Fi instead of the browser's ~30 s) reconnects immediately, preferring
-  Wi-Fi for 15 s. Again the picture stays; a toast says what happened.
+- `link.usb` during a Wi-Fi session: the app probes the cable and moves the whole session onto it,
+  without the reconnection overlay.
+- Cable unplugged: the session end (`link`) or a closed socket reconnects immediately, preferring
+  Wi-Fi for 15 s. A toast says what happened.
 - Without Wi-Fi at all the service worker serves the installed app after 2.5 s even though the
   `.local` name does not resolve, and the home screen finds the PC through the cable endpoints it
   learned earlier (plus the iPad hotspot defaults `172.20.10.2–5`). The PC then shows as
@@ -72,14 +68,14 @@ cable. The PC app reads the network category (Network List Manager) and the fire
 
 ## Settings
 
-Network → USB cable → **Stream over USB cable** (`network.usbDirect`, on by default). When off,
+Network → USB cable → **Connexion par câble USB** (`network.usbDirect`, on by default). When off,
 nothing is scanned and a session arriving on a cable address is handled like any local session.
 
 ## Limits
 
 - A Wi-Fi-only iPad has no Personal Hotspot, hence no USB network function a web app could use.
-  Streaming over its cable would require a native iPad app talking to the PC through Apple's
-  usbmux service; that is outside this web-app architecture.
+  Using its cable would require a native iPad app talking to the PC through Apple's usbmux
+  service; that is outside this web-app architecture.
 - The app origin is `https://vp-xxxxxxxx.local:47800`. Pair and open the app once while the iPad
   can resolve that name (Wi-Fi, or the cable if the iPad resolves `.local` names over its hotspot);
   afterwards the installed app starts and connects over the cable alone.
@@ -93,7 +89,7 @@ cargo build --manifest-path agent/Cargo.toml -p vp-agent
 npm run test:e2e:usb -w @vision-pro/protocol
 ```
 
-The test starts its own agent (isolated `VISION_PRO_HOME`) and checks the session path, the probe,
-the single cable ICE candidate, `link.usb` on plug-in and the immediate `link` end on unplug.
-Interactively: `vp-agentd --dev-loopback --simulate-usb`, then type `u` to unplug/plug the cable
-while the iPad app (`npm run dev:ipad`) streams.
+The test starts its own agent (isolated `VISION_PRO_HOME`), pairs with the code it shows and checks
+the session path, the probe, input on the cable session, `link.usb` on plug-in and the immediate
+`link` end on unplug. Interactively: `vp-agentd --dev-loopback --simulate-usb --connect`, then type
+`u` to unplug/plug the cable while the iPad app (`npm run dev:ipad`) is connected.

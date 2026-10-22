@@ -55,7 +55,6 @@ export function DeviceSettingsSheet({ open, onClose }: { open: boolean; onClose:
       <Group title="Experience">
         <Row icon="sparkle" title="Automatic creative profiles" subtitle="Match controls to the active Windows app" accessory={<Switch label="Automatic creative profiles" checked={prefs.autoProfiles} onChange={(autoProfiles) => updatePrefs({ autoProfiles })} />} />
         <Row icon="stats" title="Performance statistics" accessory={<Switch label="Performance statistics" checked={prefs.showStats} onChange={(showStats) => updatePrefs({ showStats })} />} />
-        <Row icon="pointer" title="Show remote cursor" accessory={<Switch label="Show remote cursor" checked={prefs.showLocalCursor} onChange={(showLocalCursor) => updatePrefs({ showLocalCursor })} />} />
       </Group>
 
       <Group title="Paired computers" footer="Retirer un ordinateur efface son autorisation locale sur cet iPad. Supprimez l’iPad depuis Windows pour couper son accès et effacer sa fiche sur le PC.">

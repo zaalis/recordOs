@@ -16,12 +16,11 @@ fn main() -> anyhow::Result<()> {
     let has = |flag: &str| args.iter().any(|a| a == flag);
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,str0m=warn".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
 
-    let engine = vp_agent::platform::media_engine();
+    let engine = vp_agent::platform::control_engine();
     let agent = Arc::new(Agent::new(engine)?);
 
     if has("--dev-loopback") {
@@ -55,24 +54,21 @@ fn main() -> anyhow::Result<()> {
         );
     }
     println!(
-        "  Encoders  {}",
+        "  Displays  {}",
         status
             .caps
-            .encoders
+            .displays
             .iter()
-            .map(|e| format!("{} ({})", e.name, e.codec.display()))
+            .map(|d| format!("{} ({}×{})", d.name, d.width, d.height))
             .collect::<Vec<_>>()
             .join(", ")
     );
 
     if has("--connect") {
         let info = agent.open_connect_window(false)?;
-        println!(
-            "\nConnect your iPad\n  Code  {}\n  Link  {}",
-            info.code, info.url
-        );
-        if let Some(setup) = &info.setup_url {
-            println!("  Setup {setup}");
+        println!("\nConnect your iPad\n  Code  {}", info.code);
+        for address in &info.addresses {
+            println!("  Open  {} ({:?})", address.url, address.network);
         }
     }
 
@@ -83,6 +79,7 @@ fn main() -> anyhow::Result<()> {
 
     let mut events = agent.subscribe();
     let events_agent = agent.clone();
+    let mut shown = agent.connect_code();
     std::thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -105,6 +102,16 @@ fn main() -> anyhow::Result<()> {
                         }
                     }
                     AgentEvent::PairingResolved { outcome, .. } => println!(">> pairing {outcome}"),
+                    AgentEvent::ConnectWindowChanged => {
+                        // A used code is replaced: show the new one.
+                        if let Some(code) = events_agent
+                            .connect_code()
+                            .filter(|c| Some(c) != shown.as_ref())
+                        {
+                            println!("  Code  {code}");
+                            shown = Some(code);
+                        }
+                    }
                     AgentEvent::UsbChanged => {
                         let usb = events_agent.status().usb;
                         println!(

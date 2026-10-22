@@ -1,5 +1,5 @@
-//! Network helpers: local-address classification (Local Only enforcement), LAN interface discovery
-//! and the stable mDNS hostname used as the web app origin.
+//! Network helpers: local-address classification (Local Only enforcement), LAN and Tailscale
+//! interface discovery and the stable mDNS hostname used as the web app origin.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
@@ -18,6 +18,53 @@ pub fn is_local_address(ip: IpAddr) -> bool {
 
 fn is_local_v4(ip: Ipv4Addr) -> bool {
     ip.is_loopback() || ip.is_private() || ip.is_link_local()
+}
+
+/// Tailscale (and other WireGuard overlays) number devices in the shared address space
+/// 100.64.0.0/10.
+pub fn is_overlay_v4(ip: Ipv4Addr) -> bool {
+    let [a, b, ..] = ip.octets();
+    a == 100 && (64..128).contains(&b)
+}
+
+/// True for peers this PC may serve without Remote Access: the local network, and the private
+/// Tailscale network when this PC is itself on one. 100.64.0.0/10 is also carrier-grade NAT
+/// space, so it only counts while a local interface has such an address.
+pub fn is_private_peer(ip: IpAddr) -> bool {
+    if is_local_address(ip) {
+        return true;
+    }
+    let v4 = match ip {
+        IpAddr::V4(v4) => v4,
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => v4,
+            None => return false,
+        },
+    };
+    is_overlay_v4(v4) && !overlay_addresses().is_empty()
+}
+
+/// This PC's Tailscale addresses (cached briefly: checked for every incoming connection).
+pub fn overlay_addresses() -> Vec<Ipv4Addr> {
+    use parking_lot::Mutex;
+    use std::time::{Duration, Instant};
+    static CACHE: Mutex<Option<(Instant, Vec<Ipv4Addr>)>> = Mutex::new(None);
+    let mut cache = CACHE.lock();
+    if let Some((at, list)) = cache.as_ref() {
+        if at.elapsed() < Duration::from_secs(5) {
+            return list.clone();
+        }
+    }
+    let list: Vec<Ipv4Addr> = if_addrs::get_if_addrs()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|iface| match iface.ip() {
+            IpAddr::V4(ip) if is_overlay_v4(ip) => Some(ip),
+            _ => None,
+        })
+        .collect();
+    *cache = Some((Instant::now(), list.clone()));
+    list
 }
 
 fn is_unique_local(ip: Ipv6Addr) -> bool {
@@ -109,6 +156,9 @@ mod tests {
         ] {
             assert!(is_local_address(local.parse().unwrap()), "{local}");
         }
+        assert!(is_overlay_v4("100.101.102.103".parse().unwrap()));
+        assert!(!is_overlay_v4("100.128.0.1".parse().unwrap()));
+        assert!(!is_overlay_v4("100.63.255.255".parse().unwrap()));
         for remote in [
             "8.8.8.8",
             "100.64.1.1",

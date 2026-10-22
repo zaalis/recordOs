@@ -1,7 +1,8 @@
 //! Local servers:
-//! - HTTPS (TLS 1.3) on the LAN: web app + `/ws` signaling. Local Only mode drops non-LAN peers
-//!   before the TLS handshake.
-//! - HTTP bootstrap: only while "Connect Device" is open; serves the trust profile, nothing else.
+//! - HTTPS (TLS 1.3) on the LAN and Tailscale: web app + `/ws` session channel. Local Only mode
+//!   drops other peers before the TLS handshake.
+//! - HTTP setup page: only while "Connect Device" is open; serves the trust profile and sends the
+//!   iPad on to the app, nothing else.
 //! - Developer loopback (opt-in): plain HTTP bound to 127.0.0.1, for testing in a desktop browser.
 
 use crate::agent::Core;
@@ -121,7 +122,7 @@ pub async fn start_bootstrap(core: Arc<Core>) -> anyhow::Result<(ServerHandle, u
                 _ = rx.changed() => break,
                 accepted = listener.accept() => {
                     let Ok((stream, peer)) = accepted else { continue };
-                    if !crate::net::is_local_address(peer.ip()) || core.guard.check_connection(peer.ip()) != Verdict::Allow {
+                    if !crate::net::is_private_peer(peer.ip()) || core.guard.check_connection(peer.ip()) != Verdict::Allow {
                         continue;
                     }
                     let router = router.clone();
@@ -158,7 +159,7 @@ async fn accept_loop(
         };
         let ip = peer.ip();
         let local_only = core.settings.read().network.mode == NetworkMode::LocalOnly;
-        if local_only && !crate::net::is_local_address(ip) {
+        if local_only && !crate::net::is_private_peer(ip) {
             // Log at most once a minute to avoid log flooding.
             let minute = crate::util::now_ms() / 60_000;
             if NONLOCAL_LOG_BUDGET.swap(minute, Ordering::Relaxed) != minute {
@@ -277,7 +278,9 @@ enum Policy {
     /// keeps its `.local` origin while it reaches the PC through a cable address.
     App(Option<String>, u16),
     DevApp(Option<String>, u16),
-    Bootstrap(String),
+    /// Setup page; it may only check and open the app (on this port) on the address it was
+    /// reached by.
+    Bootstrap(u16),
 }
 
 async fn security_headers(request: Request<Body>, next: Next, policy: Policy) -> Response<Body> {
@@ -291,27 +294,39 @@ async fn security_headers(request: Request<Body>, next: Next, policy: Policy) ->
                     .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | ':' | '-' | '[' | ']'))
         })
         .map(str::to_string);
+    let local = request.extensions().get::<LocalAddr>().map(|l| l.0);
     let mut response = next.run(request).await;
     let headers = response.headers_mut();
     let csp = match &policy {
         Policy::App(relay, port) | Policy::DevApp(relay, port) => {
-            let ws_scheme = if matches!(policy, Policy::App(..)) { "wss" } else { "ws" };
-            let mut connect = host.map(|h| format!(" {ws_scheme}://{h}")).unwrap_or_default();
+            let ws_scheme = if matches!(policy, Policy::App(..)) {
+                "wss"
+            } else {
+                "ws"
+            };
+            let mut connect = host
+                .map(|h| format!(" {ws_scheme}://{h}"))
+                .unwrap_or_default();
             connect.push_str(&format!(" {ws_scheme}://*:{port}"));
             if let Some(relay) = relay {
                 connect.push(' ');
                 connect.push_str(relay);
             }
             format!(
-                "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; \
+                "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; \
                  connect-src 'self'{connect}; worker-src 'self'; manifest-src 'self'; font-src 'self' data:; object-src 'none'; \
                  base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
             )
         }
-        Policy::Bootstrap(target) => format!(
-            "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; connect-src {target}; img-src 'self'; \
-             base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
-        ),
+        Policy::Bootstrap(port) => {
+            let target = local
+                .map(|local| app_origin(local.ip(), *port))
+                .unwrap_or_else(|| "'none'".into());
+            format!(
+                "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; connect-src {target}; img-src 'self'; \
+                 base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+            )
+        }
     };
     if let Ok(value) = HeaderValue::from_str(&csp) {
         headers.insert(header::CONTENT_SECURITY_POLICY, value);
@@ -336,7 +351,7 @@ async fn security_headers(request: Request<Body>, next: Next, policy: Policy) ->
     headers.insert(
         "permissions-policy",
         HeaderValue::from_static(
-            "camera=(self), microphone=(), geolocation=(), payment=(), usb=(), fullscreen=(self)",
+            "camera=(), microphone=(), geolocation=(), payment=(), usb=(), fullscreen=(self)",
         ),
     );
     response
@@ -444,7 +459,7 @@ async fn info_handler(State(core): State<Arc<Core>>) -> impl IntoResponse {
         "fingerprint": identity.fingerprint,
         "hostname": core.hostname,
         "port": settings.network.https_port,
-        "pairing": { "nearby": settings.network.allow_nearby_pairing },
+        "pairing": { "code": core.pairing.window().is_some() },
         "usb": { "urls": core.usb.read().urls() },
     });
     ([(header::CACHE_CONTROL, "no-store")], Json(body))
@@ -493,18 +508,36 @@ async fn static_handler(request: Request<Body>) -> Response<Body> {
 }
 
 fn bootstrap_router(core: Arc<Core>) -> Router {
-    let target = bootstrap_target(&core);
+    let port = core.settings.read().network.https_port;
     Router::new()
         .route("/", get(bootstrap_page))
         .route("/setup.js", get(bootstrap_script))
         .route("/vision-pro.mobileconfig", get(bootstrap_profile))
         .layer(middleware::from_fn(move |req, next| {
-            security_headers(req, next, Policy::Bootstrap(target.clone()))
+            security_headers(req, next, Policy::Bootstrap(port))
         }))
         .with_state(core)
 }
 
-async fn bootstrap_page(State(core): State<Arc<Core>>) -> impl IntoResponse {
+/// HTTPS origin of the app on the address an iPad reached this PC by (Wi-Fi or Tailscale).
+fn app_origin(ip: IpAddr, port: u16) -> String {
+    let ip = match ip {
+        IpAddr::V6(v6) => v6
+            .to_ipv4_mapped()
+            .map(IpAddr::V4)
+            .unwrap_or(IpAddr::V6(v6)),
+        v4 => v4,
+    };
+    match ip {
+        IpAddr::V4(v4) => format!("https://{v4}:{port}"),
+        IpAddr::V6(v6) => format!("https://[{v6}]:{port}"),
+    }
+}
+
+async fn bootstrap_page(
+    State(core): State<Arc<Core>>,
+    Extension(LocalAddr(local)): Extension<LocalAddr>,
+) -> impl IntoResponse {
     let authority_fp = core
         .authority
         .read()
@@ -512,7 +545,10 @@ async fn bootstrap_page(State(core): State<Arc<Core>>) -> impl IntoResponse {
         .map(|a| a.fingerprint_sha256())
         .unwrap_or_default();
     let settings = core.settings.read().clone();
-    let target = format!("{}/", bootstrap_target(&core));
+    // The setup page is reached by a concrete address (typed from the PC screen). Keep using it
+    // once the trust profile is installed: some iPad DNS configurations resolve an mDNS `.local`
+    // hostname to their own loopback address (127.0.0.1).
+    let target = format!("{}/", app_origin(local.ip(), settings.network.https_port));
     let html = include_str!("bootstrap.html")
         .replace("{{NAME}}", &html_escape(&settings.computer_name))
         .replace("{{TARGET}}", &html_escape(&target))
@@ -524,17 +560,6 @@ async fn bootstrap_page(State(core): State<Arc<Core>>) -> impl IntoResponse {
         ],
         html,
     )
-}
-
-/// The bootstrap QR is reached by a concrete LAN address. Keep using that form
-/// after the trust profile is installed: some iPad DNS configurations resolve
-/// an mDNS `.local` hostname to their own loopback address (127.0.0.1).
-fn bootstrap_target(core: &Core) -> String {
-    let settings = core.settings.read();
-    let host = crate::net::primary_lan_ip()
-        .map(|ip| ip.to_string())
-        .unwrap_or_else(|| core.hostname.clone());
-    format!("https://{host}:{}", settings.network.https_port)
 }
 
 async fn bootstrap_script() -> impl IntoResponse {

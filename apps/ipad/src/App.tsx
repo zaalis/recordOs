@@ -1,7 +1,6 @@
-import { parsePairingFragment } from '@vision-pro/protocol';
 import { useEffect, useSyncExternalStore } from 'react';
 import { connection } from './lib/connection.ts';
-import { rememberComputer, removeComputer, setScreen, store, updatePrefs, useApp } from './lib/store.ts';
+import { rememberComputer, removeComputer, setScreen, store, useApp } from './lib/store.ts';
 import { ConnectionOverlay } from './screens/ConnectionOverlay.tsx';
 import { Home } from './screens/Home.tsx';
 import { Insecure } from './screens/Insecure.tsx';
@@ -12,7 +11,6 @@ import { useLocalizedInterface } from './lib/i18n.ts';
 export function App() {
   useLocalizedInterface();
   const screen = useApp((s) => s.screen);
-  const ready = useApp((s) => s.ready);
   const phase = useSyncExternalStore(connection.subscribe, () => connection.getSnapshot().phase);
 
   useEffect(() => {
@@ -56,28 +54,8 @@ export function App() {
     };
   }, []);
 
-  // QR code links: https://<pc>.local:47800/#/pair?a=…&fp=…&t=…
   useEffect(() => {
-    if (!ready) return;
-    const link = parsePairingFragment(location.hash);
-    if (!link) return;
-    history.replaceState(null, '', location.pathname);
-    const { identity, prefs } = store.get();
-    if (!identity) return;
-    if (!prefs.onboarded) updatePrefs({ onboarded: true });
-    setScreen('session');
-    void connection.connect(
-      // A QR code is always an explicit, one-time pairing request. Do not let an
-      // old iPad record turn it into authentication after the PC removed access.
-      { agentId: link.agentId, name: link.name || 'PC', fingerprint: link.fingerprint, mode: 'pair', proof: { kind: 'qr', secret: link.token } },
-      identity,
-      prefs.deviceName,
-      prefs.video,
-    );
-  }, [ready]);
-
-  useEffect(() => {
-    if (phase === 'connecting' || phase === 'pairing' || phase === 'negotiating' || phase === 'streaming' || phase === 'reconnecting') {
+    if (phase === 'connecting' || phase === 'pairing' || phase === 'connected' || phase === 'reconnecting') {
       if (store.get().screen !== 'session') setScreen('session');
     }
   }, [phase]);

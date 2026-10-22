@@ -2,6 +2,7 @@
 //! for Windows Ink pen (pressure, tilt, rotation, eraser, barrel) and multi-touch.
 //! Every held key, button, pen and touch contact is tracked and released when a session ends.
 
+use crate::control::InputPolicy;
 use crate::input::{
     InputEvent, MouseButton, PenPhase, PenSample, TouchContact, TouchPhase, EXTENDED,
 };
@@ -33,15 +34,6 @@ use windows::Win32::UI::WindowsAndMessaging::{
     TOUCH_MASK_PRESSURE, XBUTTON1, XBUTTON2,
 };
 
-#[derive(Debug, Clone, Copy)]
-pub struct InputPolicy {
-    pub keyboard: bool,
-    pub mouse: bool,
-    pub pen: bool,
-    pub touch: bool,
-    pub pen_as_mouse: bool,
-}
-
 pub enum InjectCommand {
     Event(InputEvent),
     Policy(InputPolicy),
@@ -57,12 +49,16 @@ pub struct InjectorHandle {
 }
 
 impl InjectorHandle {
-    pub fn spawn(display: SharedRect, policy: InputPolicy) -> InjectorHandle {
+    /// `keep_awake` holds the display and system awake for the life of the session.
+    pub fn spawn(display: SharedRect, policy: InputPolicy, keep_awake: bool) -> InjectorHandle {
         let (sender, receiver) = crossbeam_channel::bounded::<InjectCommand>(4096);
         let thread = std::thread::Builder::new()
             .name("vp-input".into())
             .spawn(move || {
                 super::system::prioritize_current_thread();
+                // Execution state belongs to the thread that set it: this one lives exactly as
+                // long as the session.
+                let _awake = keep_awake.then(super::system::WakeLock::acquire);
                 let mut injector = Injector::new(display, policy);
                 injector.run(receiver);
             })
@@ -196,7 +192,7 @@ impl Injector {
     }
 
     fn absolute_move(&self, point: POINT) -> INPUT {
-        let desktop = super::gpu::virtual_desktop();
+        let desktop = super::displays::virtual_desktop();
         let vw = (desktop.right - desktop.left).max(2) as i64;
         let vh = (desktop.bottom - desktop.top).max(2) as i64;
         let nx = ((point.x - desktop.left) as i64 * 65535 / (vw - 1)) as i32;

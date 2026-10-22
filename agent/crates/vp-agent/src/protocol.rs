@@ -1,6 +1,5 @@
-//! Strictly validated wire messages (mirror of packages/protocol/src/signaling.ts and media.ts).
+//! Strictly validated wire messages (mirror of packages/protocol/src/signaling.ts and control.ts).
 
-use crate::config::{CodecId, VideoSettings};
 use serde::{Deserialize, Serialize};
 
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -71,70 +70,6 @@ pub struct PairRequest {
     pub proof: Option<PairProof>,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub struct ClientDisplay {
-    pub width: u32,
-    pub height: u32,
-    pub refresh_hz: f64,
-}
-
-#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub struct ClientCodec {
-    pub codec: CodecId,
-    pub power_efficient: bool,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RtcOffer {
-    pub t: String,
-    pub sdp: String,
-    pub video: VideoSettings,
-    pub display: ClientDisplay,
-    pub codecs: Vec<ClientCodec>,
-}
-
-impl RtcOffer {
-    pub fn validate(&self) -> Result<(), Invalid> {
-        if self.sdp.len() < 10 || self.sdp.len() > 48_000 {
-            return Err(Invalid("sdp"));
-        }
-        validate_video(&self.video)?;
-        let d = self.display;
-        if !(100..=8192).contains(&d.width)
-            || !(100..=8192).contains(&d.height)
-            || !(24.0..=240.0).contains(&d.refresh_hz)
-        {
-            return Err(Invalid("display"));
-        }
-        if self.codecs.len() > 8 {
-            return Err(Invalid("codecs"));
-        }
-        Ok(())
-    }
-}
-
-pub fn validate_video(video: &VideoSettings) -> Result<(), Invalid> {
-    if let Some(w) = video.custom_width {
-        if !(320..=7680).contains(&w) {
-            return Err(Invalid("customWidth"));
-        }
-    }
-    if let Some(h) = video.custom_height {
-        if !(240..=4320).contains(&h) {
-            return Err(Invalid("customHeight"));
-        }
-    }
-    if let Some(k) = video.custom_kbps {
-        if !(500..=200_000).contains(&k) {
-            return Err(Invalid("customKbps"));
-        }
-    }
-    Ok(())
-}
-
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct DeviceRotate {
@@ -158,97 +93,61 @@ pub struct DisplayInfo {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct EncoderInfo {
-    pub codec: CodecId,
-    pub hardware: bool,
-    pub name: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct AgentCaps {
-    pub encoders: Vec<EncoderInfo>,
     pub displays: Vec<DisplayInfo>,
     pub active_display_id: String,
     pub pen: bool,
     pub touch: bool,
-    pub max_fps: u32,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct AppliedVideo {
-    pub codec: CodecId,
-    pub encoder: String,
-    pub hardware: bool,
-    pub width: u32,
-    pub height: u32,
-    pub fps: u32,
-    pub target_kbps: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub fallback_reason: Option<String>,
-}
-
-#[derive(Debug, Clone, Default, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentStats {
-    pub capture_fps: f32,
-    pub encode_fps: f32,
-    pub sent_fps: f32,
-    pub capture_ms: f32,
-    pub encode_ms: f32,
-    pub target_kbps: u32,
-    pub sent_kbps: u32,
-    pub bwe_kbps: u32,
-    pub encoder: String,
-    pub encoder_state: String,
-    pub codec: String,
-    pub width: u32,
-    pub height: u32,
-    pub input_events_per_sec: f32,
-    pub input_process_ms: f32,
-    /// Average time a frame waited in the PC's send queue before its last packet left.
-    pub send_queue_ms: f32,
-    /// Longest such wait during the last second.
-    pub send_queue_max_ms: f32,
-    /// Milliseconds per second during which encoding was held back because earlier frames had
-    /// not left yet (network congestion).
-    pub held_ms: f32,
-    /// Upper bound asked of the iPad's jitter buffer, in ms (0: the iPad did not accept it).
-    pub playout_delay_cap_ms: u32,
-}
-
-/// Control data channel messages from the iPad.
+/// Session messages from the iPad (inside the encrypted channel), besides `session.close` and
+/// `device.rotate`.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "t", deny_unknown_fields)]
 pub enum ControlToAgent {
+    /// Reliable, ordered input: one binary event (see `input`), base64url.
+    #[serde(rename = "in")]
+    Input { d: String },
+    /// Latest-wins input (hover moves): an event older than the last one accepted is dropped.
+    #[serde(rename = "rt")]
+    Realtime { d: String },
+    /// `rttMs`: the round trip the iPad measured on the previous ping, shown on the PC.
     #[serde(rename = "ping")]
-    Ping { id: u32, t0: f64 },
-    #[serde(rename = "video.settings")]
-    VideoSettings { video: VideoSettings },
+    Ping {
+        id: u32,
+        t0: f64,
+        #[serde(default, rename = "rttMs")]
+        rtt_ms: Option<f32>,
+    },
     #[serde(rename = "display.select")]
     DisplaySelect {
         #[serde(rename = "displayId")]
         display_id: String,
     },
-    #[serde(rename = "keyframe")]
-    Keyframe {},
     #[serde(rename = "app.watch")]
     AppWatch { enabled: bool },
-    /// What the iPad's video receiver measures, once a second. Only logged: it is the one view of
-    /// the stream that the PC cannot have (frames dropped before decoding, keyframe requests…).
-    #[serde(rename = "client.stats", rename_all = "camelCase")]
-    ClientStats {
-        decoded_fps: f32,
-        key_frames: u32,
-        pli: u32,
-        nack: u32,
-        packets_lost: u32,
-        frames_dropped: u32,
-        freezes: u32,
-        jitter_buffer_ms: f32,
-        decode_ms: f32,
-        jitter_ms: f32,
-        codec: String,
-    },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ControlToAgent;
+
+    #[test]
+    fn session_messages_are_strict() {
+        let ping: ControlToAgent =
+            serde_json::from_str(r#"{"t":"ping","id":3,"t0":12.5,"rttMs":4.2}"#).unwrap();
+        assert!(matches!(
+            ping,
+            ControlToAgent::Ping {
+                id: 3,
+                rtt_ms: Some(_),
+                ..
+            }
+        ));
+        assert!(serde_json::from_str::<ControlToAgent>(r#"{"t":"in","d":"AQ"}"#).is_ok());
+        assert!(serde_json::from_str::<ControlToAgent>(r#"{"t":"in","d":"AQ","x":1}"#).is_err());
+        assert!(
+            serde_json::from_str::<ControlToAgent>(r#"{"t":"rtc.offer","sdp":"v=0"}"#).is_err()
+        );
+    }
 }

@@ -1,65 +1,69 @@
 import {
-  BITRATE_PRESETS_KBPS,
   DOM_CODE_TO_KEY,
   InputEncoder,
   KEY_LABEL,
-  LATENCY_PROFILES,
   VK,
   comboLabel,
   profileForExecutable,
   type AppProfile,
   type KeyControl,
   type KeyName,
-  type LatencyProfile,
   type ProfileControl,
-  type VideoSettings,
 } from '@vision-pro/protocol';
-import { Badge, Button, Group, Icon, IconButton, Row, Segmented, Slider, Switch, formatBitrate, formatMs, useToast } from '@vision-pro/design';
+import { Badge, Button, Group, Icon, IconButton, Row, Slider, Switch, formatMs, useToast } from '@vision-pro/design';
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { connection } from '../lib/connection.ts';
-import { allProfiles, setScreen, store, updatePrefs, useApp } from '../lib/store.ts';
-import type { ControlMode, Preferences, StageMode } from '../lib/storage.ts';
+import { allProfiles, setScreen, updatePrefs, useApp } from '../lib/store.ts';
+import type { ControlMode, Preferences } from '../lib/storage.ts';
 import { isFullscreenActive, toggleFullscreen } from '../lib/platform.ts';
 import { InputController, type InputSource, type ThreeDNavigation } from './input-controller.ts';
-import { ViewTransform, type ViewState } from './view.ts';
 
-type Panel = 'displays' | 'control' | 'keyboard' | 'shortcuts' | 'quality' | 'settings' | null;
+type Panel = 'displays' | 'control' | 'keyboard' | 'shortcuts' | 'settings' | null;
 type Ripple = { id: number; kind: 'tap' | 'right' | 'drag'; x: number; y: number };
 
 const encoder = new InputEncoder();
 const keyboardKeys: KeyName[] = ['Ctrl', 'Alt', 'Shift', 'Win', 'Tab', 'Esc', 'Enter', 'Delete', 'Backspace', 'F1', 'F2', 'F3', 'F4', 'F5', 'F6', 'F7', 'F8', 'F9', 'F10', 'F11', 'F12'];
 
+/**
+ * The part of the surface mapped to the PC display, with the display's proportions (like a
+ * graphics tablet's "keep proportions" mode): a stroke on the iPad keeps its shape on the PC.
+ */
+function activeArea(surface: DOMRect, display: { width: number; height: number } | undefined): DOMRect {
+  const margin = 18;
+  const width = Math.max(1, surface.width - margin * 2);
+  const height = Math.max(1, surface.height - margin * 2);
+  const ratio = display && display.width > 0 && display.height > 0 ? display.width / display.height : width / height;
+  const fitWidth = Math.min(width, height * ratio);
+  const fitHeight = fitWidth / ratio;
+  return new DOMRect(surface.left + (surface.width - fitWidth) / 2, surface.top + (surface.height - fitHeight) / 2, fitWidth, fitHeight);
+}
+
 export function Session() {
   const snapshot = useSyncExternalStore(connection.subscribe, connection.getSnapshot);
   const prefs = useApp((s) => s.prefs);
   const surfaceRef = useRef<HTMLDivElement>(null);
-  const canvasRef = useRef<HTMLDivElement>(null);
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const freezeRef = useRef<HTMLCanvasElement>(null);
   const hiddenInputRef = useRef<HTMLInputElement>(null);
-  const viewRef = useRef(new ViewTransform());
   const controllerRef = useRef<InputController | null>(null);
-  const [view, setView] = useState<ViewState>(viewRef.current.state);
   const [panel, setPanel] = useState<Panel>(null);
   const [interfaceHidden, setInterfaceHidden] = useState(false);
   const [idle, setIdle] = useState(false);
   const [ripples, setRipples] = useState<Ripple[]>([]);
-  const [cursor, setCursor] = useState({ x: 0.5, y: 0.5, visible: false, shapeId: 0 });
   const [latched, setLatched] = useState<Set<KeyName>>(new Set());
   const [toolbarDrag, setToolbarDrag] = useState<{ x: number; y: number } | null>(null);
   const [inputSource, setInputSource] = useState<InputSource>('fingers');
   const [fullscreen, setFullscreen] = useState(() => isFullscreenActive());
+  const [area, setArea] = useState<DOMRect | null>(null);
   const activityTimer = useRef(0);
   const toast = useToast();
   const previousLink = useRef(snapshot.link);
 
-  // Confirm the move when a plugged-in cable takes over the stream (and when it is unplugged).
+  // Confirm the move when a plugged-in cable takes over the session (and when it is unplugged).
   useEffect(() => {
     const before = previousLink.current;
     previousLink.current = snapshot.link;
     if (!before || !snapshot.link || before === snapshot.link) return;
-    if (snapshot.link === 'usb') toast('Flux transmis par le câble USB', { icon: 'cable', tone: 'green' });
-    else if (before === 'usb') toast('Câble débranché : le flux repasse par le réseau', { icon: 'wifi' });
+    if (snapshot.link === 'usb') toast('Commandes transmises par le câble USB', { icon: 'cable', tone: 'green' });
+    else if (before === 'usb') toast('Câble débranché : les commandes repassent par le réseau', { icon: 'wifi' });
   }, [snapshot.link, toast]);
 
   const activeProfile = useMemo(() => {
@@ -68,9 +72,10 @@ export function Session() {
     return profiles.find((p) => p.id === prefs.activeProfileId) ?? profiles[0]!;
   }, [prefs.activeProfileId, prefs.autoProfiles, snapshot.activeApp]);
   const threeDNavigation: ThreeDNavigation = activeProfile.id === 'blender' || activeProfile.id === 'maya' || activeProfile.id === 'zbrush' || activeProfile.id === 'houdini' ? activeProfile.id : 'none';
+  const display = snapshot.displays.find((d) => d.id === snapshot.activeDisplayId) ?? snapshot.displays[0];
 
   const activity = useCallback(() => {
-    // While controls are hidden, regular modelling gestures must stay focused
+    // While controls are hidden, regular drawing gestures must stay focused
     // on the remote application. Only the dedicated reveal zone brings them
     // back, so the toolbar never obstructs an ongoing creation session.
     if (interfaceHidden) return;
@@ -97,98 +102,25 @@ export function Session() {
   }, [panel]);
 
   const contentRect = useCallback((): DOMRect | null => {
-    if (prefs.stageMode === 'tablet') return surfaceRef.current?.getBoundingClientRect() ?? null;
-    const video = videoRef.current;
-    if (!video) return null;
-    const box = video.getBoundingClientRect();
-    const sourceRatio = (video.videoWidth || snapshot.video?.width || 16) / (video.videoHeight || snapshot.video?.height || 9);
-    const boxRatio = box.width / Math.max(1, box.height);
-    if (boxRatio > sourceRatio) {
-      const width = box.height * sourceRatio;
-      return new DOMRect(box.left + (box.width - width) / 2, box.top, width, box.height);
-    }
-    const height = box.width / sourceRatio;
-    return new DOMRect(box.left, box.top + (box.height - height) / 2, box.width, height);
-  }, [prefs.stageMode, snapshot.video?.height, snapshot.video?.width]);
+    const surface = surfaceRef.current?.getBoundingClientRect();
+    return surface ? activeArea(surface, display) : null;
+  }, [display]);
 
   const sendCombo = useCallback((keys: readonly KeyName[]) => {
     connection.sendInput(encoder.combo(keys.map((key) => VK[key])));
     activity();
   }, [activity]);
 
-  useEffect(() => viewRef.current.subscribe(setView), []);
+  // Draw the active area where input is mapped, and follow rotations and display changes.
   useEffect(() => {
-    const resize = () => {
-      const box = surfaceRef.current?.getBoundingClientRect();
-      if (box) viewRef.current.setBounds(box.width, box.height);
-    };
-    resize();
-    const observer = new ResizeObserver(resize);
-    if (surfaceRef.current) observer.observe(surfaceRef.current);
+    const surface = surfaceRef.current;
+    if (!surface) return;
+    const measure = () => setArea(contentRect());
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(surface);
     return () => observer.disconnect();
-  }, []);
-
-  useEffect(() => {
-    const video = videoRef.current;
-    if (!video) return;
-    const freeze = freezeRef.current;
-    if (!snapshot.stream) {
-      // A remote or local disconnect can leave this component mounted briefly while the
-      // connection overlay takes over. Detach the old MediaStream and frozen frame immediately.
-      video.pause();
-      video.srcObject = null;
-      if (freeze) freeze.hidden = true;
-      return;
-    }
-    // A new stream (cable plugged or unplugged, reconnection) starts black: keep the last
-    // picture on screen until its first frame is decoded.
-    if (freeze && video.srcObject && video.srcObject !== snapshot.stream && video.videoWidth > 0) {
-      try {
-        freeze.width = video.videoWidth;
-        freeze.height = video.videoHeight;
-        freeze.getContext('2d')?.drawImage(video, 0, 0);
-        freeze.hidden = false;
-      } catch {
-        freeze.hidden = true;
-      }
-    }
-    const reveal = () => {
-      if (freeze) freeze.hidden = true;
-    };
-    const fallback = window.setTimeout(reveal, 4000);
-    video.addEventListener('loadeddata', reveal, { once: true });
-    video.srcObject = snapshot.stream;
-    // Safari pauses the element when the tab is hidden or restored from the cache.
-    const resume = () => {
-      if (!document.hidden && video.srcObject === snapshot.stream && video.paused) {
-        void video.play().catch(() => undefined);
-      }
-    };
-    resume();
-    video.addEventListener('loadedmetadata', resume);
-    document.addEventListener('visibilitychange', resume);
-    return () => {
-      window.clearTimeout(fallback);
-      video.removeEventListener('loadeddata', reveal);
-      video.removeEventListener('loadedmetadata', resume);
-      document.removeEventListener('visibilitychange', resume);
-    };
-  }, [snapshot.stream]);
-
-  useEffect(() => {
-    const video = videoRef.current;
-    connection.observeVideo(video);
-    return () => {
-      connection.observeVideo(null);
-      if (video) video.srcObject = null;
-    };
-  }, []);
-
-  useEffect(() => {
-    connection.onCursor = (next) => setCursor(next);
-    connection.onCursorShape = () => setCursor((current) => ({ ...current }));
-    return () => { connection.onCursor = undefined; connection.onCursorShape = undefined; };
-  }, []);
+  }, [contentRect]);
 
   useEffect(() => {
     const surface = surfaceRef.current;
@@ -197,7 +129,6 @@ export function Session() {
       surface,
       contentRect,
       { reliable: (buffer) => connection.sendInput(buffer), realtime: (buffer) => connection.sendRealtime(buffer) },
-      viewRef.current,
       prefs,
       {
         onToggleInterface: () => setInterfaceHidden((hidden) => !hidden),
@@ -206,7 +137,6 @@ export function Session() {
           setRipples((items) => [...items.slice(-4), { id, kind, x, y }]);
           window.setTimeout(() => setRipples((items) => items.filter((item) => item.id !== id)), 500);
         },
-        onLocalCursorMove: (dx, dy) => setCursor((current) => ({ ...current, x: Math.max(0, Math.min(1, current.x + dx)), y: Math.max(0, Math.min(1, current.y + dy)), visible: true })),
         onUndo: () => sendCombo(['Ctrl', 'Z']),
         onRedo: () => sendCombo(['Ctrl', 'Shift', 'Z']),
         onActivity: activity,
@@ -237,7 +167,7 @@ export function Session() {
 
   useEffect(() => () => window.clearTimeout(activityTimer.current), []);
 
-  // Start the five-second countdown as soon as the remote stage is ready.
+  // Start the five-second countdown as soon as the surface is ready.
   useEffect(() => {
     if (interfaceHidden || panel) {
       window.clearTimeout(activityTimer.current);
@@ -265,13 +195,6 @@ export function Session() {
   const setMode = (mode: ControlMode) => {
     updatePrefs({ controlMode: mode });
     if (controllerRef.current) controllerRef.current.mode = mode;
-  };
-
-  const setStageMode = (stageMode: StageMode) => {
-    updatePrefs({ stageMode });
-    // A screenless tablet has a one-to-one active area. Resetting the view
-    // prevents a prior pinch/pan from shifting the input coordinate space.
-    if (stageMode === 'tablet') viewRef.current.reset();
   };
 
   const disconnect = () => {
@@ -333,7 +256,6 @@ export function Session() {
     }
   };
 
-  const cursorShape = connection.getCursorShape(cursor.shapeId);
   const toolbarStyle = toolbarDrag
     ? { left: toolbarDrag.x, top: toolbarDrag.y, transform: 'translate(-50%, -50%)' }
     : toolbarPosition(prefs.toolbar.edge, prefs.toolbar.offset);
@@ -341,30 +263,18 @@ export function Session() {
 
   return (
     <main className="stage" onPointerDown={activity}>
-      {prefs.stageMode === 'stream' && <>
-        <div ref={canvasRef} className="stage-canvas" style={{ transform: `translate3d(${view.x}px, ${view.y}px, 0) scale(${view.scale})` }}>
-          <video ref={videoRef} className="stage-video" playsInline muted />
-          <canvas ref={freezeRef} className="stage-video" hidden aria-hidden="true" />
-        </div>
-        {!snapshot.stream && <div className="stage-waiting"><Icon name="display" size={34} /><span>Waiting for the first secure video frame…</span></div>}
-      </>}
-      {prefs.stageMode === 'tablet' && <div className="tablet-surface" aria-hidden="true" />}
-      <div ref={surfaceRef} className="stage-surface" aria-label={prefs.stageMode === 'tablet' ? 'Surface de tablette graphique' : `${prefs.controlMode} remote control surface`} />
+      <div className="tablet-surface" aria-hidden="true" />
+      {area && <div className="tablet-area" aria-hidden="true" style={{ left: area.left, top: area.top, width: area.width, height: area.height }} />}
+      <div ref={surfaceRef} className="stage-surface" aria-label={`Surface de tablette graphique (${prefs.controlMode})`} />
 
-      {prefs.stageMode === 'stream' && prefs.showLocalCursor && cursor.visible && (
-        cursorShape
-          ? <img className="remote-cursor" src={cursorShape.url} alt="" style={{ width: cursorShape.width, height: cursorShape.height, transform: `translate(${cursor.x * innerWidth - cursorShape.hotX}px, ${cursor.y * innerHeight - cursorShape.hotY}px)` }} />
-          : <div className="remote-cursor" style={{ transform: `translate(${cursor.x * innerWidth}px, ${cursor.y * innerHeight}px)` }}><Icon name="pointer" size={20} /></div>
-      )}
       {ripples.map((ripple) => <span key={ripple.id} className="touch-ripple" data-kind={ripple.kind} style={{ left: ripple.x, top: ripple.y }} />)}
 
-      {prefs.stageMode === 'stream' && view.scale > 1.01 && <div className="zoom-indicator vp-glass">{Math.round(view.scale * 100)}% <IconButton icon="close" label="Reset zoom" size="sm" onClick={() => viewRef.current.reset()} /></div>}
-      {prefs.stageMode === 'stream' && <div className="input-source-indicator vp-glass" aria-live="polite"><Icon name={inputSource === 'pencil' ? 'pencil' : inputSource === 'pointer' ? 'trackpad' : 'touch'} size={16} /><span>{threeDNavigation !== 'none' ? activeProfile.name : 'Windows'}</span><span aria-hidden="true">·</span><span>{inputSource === 'pencil' ? 'Apple Pencil' : inputSource === 'pointer' ? 'Trackpad or mouse' : 'Fingers'}</span></div>}
-      {!snapshot.controlAllowed && <div className="banner vp-glass"><Icon name="eye" size={18} /> View only — input is disabled on Windows</div>}
-      {snapshot.phase === 'reconnecting' && !snapshot.switching && <div className="banner vp-glass"><span className="vp-spinner" /> Reconnecting securely…</div>}
+      {!interfaceHidden && <div className="input-source-indicator vp-glass" aria-live="polite"><Icon name={inputSource === 'pencil' ? 'pencil' : inputSource === 'pointer' ? 'trackpad' : 'touch'} size={16} /><span>{threeDNavigation !== 'none' ? activeProfile.name : display?.name ?? 'Windows'}</span><span aria-hidden="true">·</span><span>{inputSource === 'pencil' ? 'Apple Pencil' : inputSource === 'pointer' ? 'Trackpad ou souris' : 'Doigts'}</span></div>}
+      {!snapshot.controlAllowed && <div className="banner vp-glass"><Icon name="eye" size={18} /> Commandes désactivées sur le PC</div>}
+      {snapshot.phase === 'reconnecting' && !snapshot.switching && <div className="banner vp-glass"><span className="vp-spinner" /> Reconnexion sécurisée…</div>}
 
       {prefs.showStats && <Stats state={snapshot} />}
-      {panel && !interfaceHidden && <PanelView panel={panel} profile={activeProfile} prefs={prefs} state={snapshot} onClose={() => setPanel(null)} onMode={setMode} onStageMode={setStageMode} onCombo={sendCombo} onTextFocus={() => hiddenInputRef.current?.focus()} style={panelStyle} latched={latched} setLatched={setLatched} />}
+      {panel && !interfaceHidden && <PanelView panel={panel} profile={activeProfile} prefs={prefs} state={snapshot} onClose={() => setPanel(null)} onMode={setMode} onCombo={sendCombo} onTextFocus={() => hiddenInputRef.current?.focus()} style={panelStyle} latched={latched} setLatched={setLatched} />}
 
       {!interfaceHidden && (
         <nav className="toolbar" aria-label="Session controls" data-dragging={toolbarDrag ? 'true' : undefined} data-idle={idle ? 'true' : undefined} data-vertical={prefs.toolbar.edge === 'left' || prefs.toolbar.edge === 'right' ? 'true' : undefined} style={toolbarStyle}>
@@ -375,7 +285,6 @@ export function Session() {
           <ToolbarButton icon={prefs.controlMode === 'pencil' ? 'pencil' : prefs.controlMode === 'trackpad' ? 'trackpad' : 'touch'} label="Control" active={panel === 'control'} onClick={() => choosePanel('control')} />
           <ToolbarButton icon="keyboard" label="Keyboard" active={panel === 'keyboard'} onClick={() => choosePanel('keyboard')} />
           <ToolbarButton icon="command" label="Shortcuts" active={panel === 'shortcuts'} onClick={() => choosePanel('shortcuts')} />
-          <ToolbarButton icon="gauge" label="Quality" active={panel === 'quality'} onClick={() => choosePanel('quality')} />
           <ToolbarButton icon="gear" label="Settings" active={panel === 'settings'} onClick={() => choosePanel('settings')} />
           <ToolbarButton icon={fullscreen ? 'collapse' : 'fullscreen'} label={fullscreen ? 'Exit fullscreen' : 'Enter fullscreen'} active={fullscreen} onClick={toggleStageFullscreen} />
           <ToolbarButton icon="collapse" label="Hide controls" onClick={() => { window.clearTimeout(activityTimer.current); setPanel(null); setIdle(true); setInterfaceHidden(true); }} />
@@ -403,38 +312,36 @@ function ToolbarButton({ icon, label, active, onClick }: { icon: Parameters<type
   return <button type="button" className="toolbar-button" aria-label={label} aria-pressed={active} onClick={onClick}><Icon name={icon} /><span className="label">{label}</span></button>;
 }
 
-function PanelView({ panel, profile, prefs, state, onClose, onMode, onStageMode, onCombo, onTextFocus, style, latched, setLatched }: {
+function PanelView({ panel, profile, prefs, state, onClose, onMode, onCombo, onTextFocus, style, latched, setLatched }: {
   panel: Exclude<Panel, null>;
   profile: AppProfile;
   prefs: Preferences;
   state: ReturnType<typeof connection.getSnapshot>;
   onClose: () => void;
   onMode: (mode: ControlMode) => void;
-  onStageMode: (mode: StageMode) => void;
   onCombo: (keys: readonly KeyName[]) => void;
   onTextFocus: () => void;
   style: React.CSSProperties;
   latched: Set<KeyName>;
   setLatched: React.Dispatch<React.SetStateAction<Set<KeyName>>>;
 }) {
-  const titles = { displays: 'Displays', control: 'Control', keyboard: 'Keyboard', shortcuts: profile.name, quality: 'Streaming', settings: 'Session' };
+  const titles = { displays: 'Écrans', control: 'Control', keyboard: 'Keyboard', shortcuts: profile.name, settings: 'Session' };
   return (
-    <aside className="panel" data-wide={panel === 'shortcuts' || panel === 'quality' ? 'true' : undefined} style={style} aria-label={titles[panel]}>
+    <aside className="panel" data-wide={panel === 'shortcuts' ? 'true' : undefined} style={style} aria-label={titles[panel]}>
       <header className="panel-header"><h3>{titles[panel]}</h3><IconButton icon="close" label="Close" size="sm" onClick={onClose} /></header>
       <div className="panel-body">
         {panel === 'displays' && <DisplaysPanel state={state} />}
         {panel === 'control' && <ControlPanel prefs={prefs} onMode={onMode} />}
         {panel === 'keyboard' && <KeyboardPanel onCombo={onCombo} onTextFocus={onTextFocus} latched={latched} setLatched={setLatched} />}
         {panel === 'shortcuts' && <ShortcutsPanel profile={profile} onCombo={onCombo} latched={latched} setLatched={setLatched} />}
-        {panel === 'quality' && <QualityPanel prefs={prefs} state={state} />}
-      {panel === 'settings' && <SessionSettings prefs={prefs} state={state} onStageMode={onStageMode} />}
+        {panel === 'settings' && <SessionSettings prefs={prefs} state={state} />}
       </div>
     </aside>
   );
 }
 
 function DisplaysPanel({ state }: { state: ReturnType<typeof connection.getSnapshot> }) {
-  return <Group footer="Switching displays requests a fresh keyframe; input remains mapped to the selected display.">{state.displays.map((display) => <Row key={display.id} icon="display" title={display.name} subtitle={`${display.width} × ${display.height} · ${display.refreshHz} Hz`} accessory={display.id === state.activeDisplayId ? <Badge tone="green" dot>Active</Badge> : <Button size="sm" onClick={() => connection.selectDisplay(display.id)}>Use</Button>} />)}</Group>;
+  return <Group footer="La surface de l’iPad correspond à l’écran choisi, avec ses proportions.">{state.displays.map((display) => <Row key={display.id} icon="display" title={display.name} subtitle={`${display.width} × ${display.height}`} accessory={display.id === state.activeDisplayId ? <Badge tone="green" dot>Actif</Badge> : <Button size="sm" onClick={() => connection.selectDisplay(display.id)}>Utiliser</Button>} />)}</Group>;
 }
 
 function ControlPanel({ prefs, onMode }: { prefs: Preferences; onMode: (mode: ControlMode) => void }) {
@@ -477,34 +384,24 @@ function ShortcutKey({ control, active, onTrigger }: { control: KeyControl; acti
   return <button type="button" className="key" data-wide={control.wide ? 'true' : undefined} data-latched={active && control.mode === 'latch' ? 'true' : undefined} onClick={onTrigger}>{control.label}<small>{control.hint ?? comboLabel(control.keys)}</small></button>;
 }
 
-function QualityPanel({ prefs, state }: { prefs: Preferences; state: ReturnType<typeof connection.getSnapshot> }) {
-  const updateVideo = (patch: Partial<VideoSettings>) => { const video = { ...prefs.video, ...patch }; updatePrefs({ video }); connection.updateVideo(video); };
-  return <>
-    <div className="latency-cards">{Object.values(LATENCY_PROFILES).map((profile) => <button key={profile.id} type="button" className="latency-card" aria-pressed={prefs.video.profile === profile.id} onClick={() => updateVideo({ profile: profile.id })}><b>{profile.name}</b><small>{profile.summary}</small></button>)}</div>
-    <Group title="Video">
-      <div className="field-stack"><span>Resolution</span><Segmented block ariaLabel="Resolution" value={prefs.video.resolution} options={['auto', '720p', '1080p', '1440p', '2160p', '4320p', 'native'].map((value) => ({ value, label: value === 'auto' ? 'Auto' : value === '1440p' ? '2K' : value === '2160p' ? '4K' : value === '4320p' ? '8K' : value === 'native' ? 'Native' : value }))} onChange={(resolution) => updateVideo({ resolution: resolution as VideoSettings['resolution'] })} /></div>
-      <div className="field-stack"><span>Frame rate</span><Segmented block ariaLabel="Frame rate" value={String(prefs.video.fps)} options={['auto', '30', '60', '90', '120'].map((value) => ({ value, label: value === 'auto' ? 'Auto' : value }))} onChange={(fps) => updateVideo({ fps: fps === 'auto' ? 'auto' : Number(fps) as 30 | 60 | 90 | 120 })} /></div>
-      <div className="field-stack"><span>Codec</span><Segmented block ariaLabel="Codec" value={prefs.video.codec} options={['auto', 'h264', 'hevc', 'av1'].map((value) => ({ value, label: value === 'auto' ? 'Auto' : value.toUpperCase() }))} onChange={(codec) => updateVideo({ codec: codec as VideoSettings['codec'] })} /></div>
-    </Group>
-    {state.video && <div className="metric-grid"><Metric label="Resolution" value={`${state.video.width} × ${state.video.height}`} /><Metric label="Frame rate" value={`${state.video.fps} FPS`} /><Metric label="Bitrate" value={formatBitrate(state.video.targetKbps)} /><Metric label="Codec" value={state.video.codec.toUpperCase()} /><Metric label="Encoder" value={state.video.hardware ? 'Hardware' : 'Software'} /><Metric label="Network" value={formatBitrate(state.stats.networkKbps ?? undefined)} /></div>}
-  </>;
+function linkLabel(state: ReturnType<typeof connection.getSnapshot>): string {
+  if (state.link === 'usb') return 'Câble USB';
+  if (state.link === 'relay') return 'Relais Internet';
+  return /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(location.hostname) ? 'Tailscale' : 'Réseau local';
 }
 
-function SessionSettings({ prefs, state, onStageMode }: { prefs: Preferences; state: ReturnType<typeof connection.getSnapshot>; onStageMode: (mode: StageMode) => void }) {
+function SessionSettings({ prefs, state }: { prefs: Preferences; state: ReturnType<typeof connection.getSnapshot> }) {
   return <>
-    <Group title="Affichage"><div className="field-stack"><span>Surface de travail</span><Segmented block ariaLabel="Surface de travail" value={prefs.stageMode} options={[{ value: 'stream', label: 'Écran du PC' }, { value: 'tablet', label: 'Tablette graphique' }]} onChange={(mode) => onStageMode(mode as StageMode)} /></div><p className="vp-footnote">Tablette graphique masque l’image du PC et conserve les gestes de contrôle sur une surface noire à points fins.</p></Group>
-    <Group title="Interface"><Row icon="stats" title="Statistics overlay" accessory={<Switch label="Statistics overlay" checked={prefs.showStats} onChange={(showStats) => updatePrefs({ showStats })} />} /><Row icon="pointer" title="Remote cursor" accessory={<Switch label="Remote cursor" checked={prefs.showLocalCursor} onChange={(showLocalCursor) => updatePrefs({ showLocalCursor })} />} /><Row icon="collapse" title="Commandes masquées après 5 secondes" value="Activé" /><Row icon="fullscreen" title="Fullscreen" onClick={() => void toggleFullscreen()} chevron /></Group>
-    <Group title="Connection"><Row icon="shield" title="Encryption" value="DTLS + E2EE" /><Row icon={state.link === 'usb' ? 'cable' : 'network'} title="Path" value={state.link === 'usb' ? 'Câble USB' : state.link === 'relay' || state.stats.candidateType === 'relay' ? 'Internet relay' : 'Réseau local'} /><Row icon="clock" title="Session" value={state.session?.expiresAt ? new Date(state.session.expiresAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'Active'} /></Group>
-    <Button variant="danger" icon="power" block onClick={() => { connection.disconnect(); setScreen('home'); }}>Disconnect</Button>
+    <Group title="Interface"><Row icon="stats" title="Latence affichée" accessory={<Switch label="Latence affichée" checked={prefs.showStats} onChange={(showStats) => updatePrefs({ showStats })} />} /><Row icon="collapse" title="Commandes masquées après 5 secondes" value="Activé" /><Row icon="fullscreen" title="Plein écran" onClick={() => void toggleFullscreen()} chevron /></Group>
+    <Group title="Connexion"><Row icon="shield" title="Chiffrement" value="TLS + bout en bout" /><Row icon={state.link === 'usb' ? 'cable' : 'network'} title="Chemin" value={linkLabel(state)} /><Row icon="gauge" title="Latence" value={formatMs(state.stats.inputLatencyMs)} /><Row icon="clock" title="Session" value={state.session?.expiresAt ? `jusqu’à ${new Date(state.session.expiresAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : 'Active'} /></Group>
+    <Button variant="danger" icon="power" block onClick={() => { connection.disconnect(); setScreen('home'); }}>Déconnecter</Button>
   </>;
 }
 
 function Stats({ state }: { state: ReturnType<typeof connection.getSnapshot> }) {
   const stats = state.stats;
-  return <aside className="stats-overlay" aria-label="Connection statistics"><div className="stats-title"><span className="vp-dot" data-tone="green" /> Live</div><dl><dt>Ping</dt><dd>{formatMs(stats.pingMs)}</dd><dt>Input</dt><dd>{formatMs(stats.inputLatencyMs)}</dd><dt>Video</dt><dd title={stats.videoLatencyMeasured ? 'Measured from capture to display' : 'Estimated from each stage'}>{stats.videoLatencyMs != null && !stats.videoLatencyMeasured ? '≈ ' : ''}{formatMs(stats.videoLatencyMs)}</dd><dt>PC queue</dt><dd>{formatMs(stats.agent?.sendQueueMs)}</dd><dt>Buffer</dt><dd>{formatMs(stats.jitterBufferMs)}</dd><dt>Decoded</dt><dd>{stats.decodedFps?.toFixed(0) ?? '—'} FPS</dd><dt>Captured</dt><dd>{stats.agent?.captureFps?.toFixed(0) ?? '—'} FPS</dd><dt>Sent</dt><dd>{stats.agent?.sentFps?.toFixed(0) ?? '—'} FPS</dd><dt>Bitrate</dt><dd>{formatBitrate(stats.bitrateKbps ?? undefined)}</dd><dt>Loss</dt><dd>{stats.packetLossPct == null ? '—' : `${stats.packetLossPct.toFixed(2)}%`}</dd><dt>Jitter</dt><dd>{formatMs(stats.jitterMs)}</dd><dt>Codec</dt><dd>{stats.codec?.toUpperCase() ?? '—'}</dd><dt>Path</dt><dd>{state.link === 'usb' ? 'USB' : state.link === 'relay' ? 'Relais' : 'Wi-Fi'}</dd></dl></aside>;
+  return <aside className="stats-overlay" aria-label="Connection statistics"><div className="stats-title"><span className="vp-dot" data-tone="green" /> Live</div><dl><dt>Ping</dt><dd>{formatMs(stats.pingMs)}</dd><dt>Commandes</dt><dd>{formatMs(stats.inputLatencyMs)}</dd><dt>Chemin</dt><dd>{linkLabel(state)}</dd></dl></aside>;
 }
-
-function Metric({ label, value }: { label: string; value: string }) { return <div className="metric"><b>{value}</b><span>{label}</span></div>; }
 
 function toolbarPosition(edge: Preferences['toolbar']['edge'], offset: number): React.CSSProperties {
   const pct = `${Math.round(Math.max(0.12, Math.min(0.88, offset)) * 100)}%`;

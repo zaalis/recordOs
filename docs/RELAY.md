@@ -2,12 +2,15 @@
 
 Remote Access lets a paired iPad control its PC from any network. Both devices make outbound
 connections to a Vision-Pro relay (`agent/crates/vp-relay`) that you operate. The relay routes
-bytes; it never holds a key that could read the screen, the input or the signaling.
+bytes; it never holds a key that could read the input or the session.
+
+> Simpler alternative: put the PC and the iPad on the same [Tailscale](https://tailscale.com)
+> network. "Connect Device" then shows the PC's Tailscale address, and the iPad reaches the PC from
+> anywhere as if it were on the local network — no relay, no public host, no open port.
 
 ```text
 iPad (any network)                     Relay (public host)                    PC (home network)
   wss /v1/connect/<agentId>  ───────►  splice  ◄───────  wss /v1/accept/<ticket>
-  TURN udp/tcp/tls :3478/5349 ───────► TURN ◄─ tunnel ─► UDP :3478 (WebSocket fallback)
                                         ▲
                                         └──── wss /v1/agent (challenge-signed registration)
 ```
@@ -24,22 +27,18 @@ iPad (any network)                     Relay (public host)                    PC
    PC to dial `wss://relay/v1/accept/<ticket>` (192-bit, single use, 10 s) and splices both sockets.
    The unchanged Vision-Pro handshake then runs end to end: the iPad verifies the pinned agent key,
    so a malicious relay can only drop the connection.
-4. **Media.** For relayed sessions the PC asks the relay for a TURN credential bound to a fresh
-   virtual peer address and sends it to the iPad inside the encrypted channel (`session.ready.ice`).
-   The iPad uses `iceTransportPolicy: "relay"`; the PC announces the virtual address as its only ICE
-   candidate. Packets travel iPad ⇄ TURN allocation ⇄ tunnel ⇄ PC. WebRTC DTLS-SRTP and SCTP
-   protect video and input exactly as on the local network.
+4. **Input.** Nothing is streamed from the PC: the iPad's input travels inside the same encrypted
+   session, through the same splice. No media path, TURN or UDP is involved.
 
 ## Security properties
 
 | Threat | Control |
 | --- | --- |
 | Relay reads or alters signaling | Handshake pinned to the agent key, AES-GCM frames, transcript signatures |
-| Relay reads or alters video/input | DTLS fingerprints exchanged over the encrypted channel; DTLS-SRTP/SCTP |
+| Relay reads or alters input | Input is inside the end-to-end encrypted session (AES-GCM, strict sequence numbers) |
 | Relay impersonates the PC | iPad rejects any agent key that differs from the pinned fingerprint |
 | Someone registers as your PC | Registration requires a signature by the agent private key |
-| Strangers pair over the Internet | Nearby (code-less) pairing is refused on relayed sessions; a code or QR proof and PC approval are required |
-| Relay used as an open TURN proxy | Credentials are only issued to registered agents; permissions, channels and indications are restricted to that agent's leased virtual address |
+| Strangers pair over the Internet | Pairing always requires the code shown on the PC |
 | Brute force from the Internet | Relay rate limits per source; the PC applies its lockout policy to the client IP reported by the relay |
 | Unwanted exposure | Local Only mode never starts the relay client; the PC never listens on a public port |
 
@@ -48,13 +47,9 @@ and traffic volume.
 
 ## Deploying a relay
 
-Requirements: a public host (VPS) with a DNS name, and these inbound ports:
-
-| Port | Protocol | Purpose |
-| --- | --- | --- |
-| 443 | TCP | `wss://` signaling and agent registration |
-| 3478 | UDP + TCP | TURN for iPads, media tunnel for PCs |
-| 5349 | TCP | TURN over TLS (networks that only allow TLS) |
+Requirements: a public host (VPS) with a DNS name, and inbound TCP 443 (`wss://` sessions and agent
+registration). The relay binary still opens its TURN ports (3478, 5349) from the screen-streaming
+versions; current PCs and iPads never use them, so they do not need to be reachable.
 
 A certificate trusted by iPadOS is mandatory (for example Let's Encrypt):
 
@@ -86,7 +81,7 @@ Or natively: `cargo build --release -p vp-relay`.
 ## Configuring the PC and the iPad
 
 1. On the PC: **Network → Remote Access**, enter `relay.example.com` and the access token, then save.
-   The status shows *Reachable from the Internet* once registered (and whether media uses UDP).
+   The status shows *Reachable from the Internet* once registered.
 2. Connect the iPad once on the local network. The next session records the relay.
 3. Away from home, open Vision-Pro on the iPad: the PC appears with **Via Internet**.
 
@@ -98,5 +93,6 @@ After changing the relay address, open the app once on the local network.
 - `cargo test -p vp-relay` — STUN codec (RFC 5769 vectors), registration, ticket splice, TURN over
   UDP/TCP, peer restriction, WebSocket media fallback.
 - `cargo test -p vp-agent --test relay_link` — the real agent against the real relay: token refusal,
-  registration, UDP tunnel, credentials, automatic reconnection, Local Only shutdown.
-- `packages/protocol/test/e2e-relay.ts` — handshake through a running relay and agent.
+  registration, automatic reconnection, Local Only shutdown.
+- `packages/protocol/test/e2e-relay.ts` — code pairing and authentication through a running relay
+  and agent.

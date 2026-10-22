@@ -142,8 +142,8 @@ async fn allow_usb_link(agent: tauri::State<'_, SharedAgent>, id: String) -> Res
 /// if the folder cannot be written. The returned guard flushes the file on exit and must stay
 /// alive.
 fn init_logging() -> Option<tracing_appender::non_blocking::WorkerGuard> {
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| "info,str0m=warn".into());
+    let filter =
+        tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
     let appender = vp_agent::paths::ensure_data_dir().ok().and_then(|dir| {
         tracing_appender::rolling::Builder::new()
             .rotation(tracing_appender::rolling::Rotation::DAILY)
@@ -190,7 +190,7 @@ fn main() {
         ))
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .setup(|app| {
-            let agent = Arc::new(Agent::new(vp_agent::platform::media_engine())?);
+            let agent = Arc::new(Agent::new(vp_agent::platform::control_engine())?);
             if agent.settings().advanced.start_service_on_launch {
                 if let Err(error) = agent.start_service() {
                     eprintln!("Vision-Pro service did not start: {error}");

@@ -16,150 +16,6 @@ pub enum NetworkMode {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
-pub enum LatencyProfile {
-    Balanced,
-    LowLatency,
-    MaxQuality,
-    BatterySaver,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum CodecId {
-    H264,
-    Hevc,
-    Av1,
-}
-
-impl CodecId {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            CodecId::H264 => "h264",
-            CodecId::Hevc => "hevc",
-            CodecId::Av1 => "av1",
-        }
-    }
-    pub fn display(self) -> &'static str {
-        match self {
-            CodecId::H264 => "H.264",
-            CodecId::Hevc => "HEVC",
-            CodecId::Av1 => "AV1",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum CodecSetting {
-    Auto,
-    H264,
-    Hevc,
-    Av1,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum ResolutionMode {
-    Auto,
-    #[serde(rename = "720p")]
-    P720,
-    #[serde(rename = "1080p")]
-    P1080,
-    #[serde(rename = "1440p")]
-    P1440,
-    #[serde(rename = "2160p")]
-    P2160,
-    #[serde(rename = "4320p")]
-    P4320,
-    Native,
-    Custom,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum BitrateMode {
-    Auto,
-    Low,
-    Medium,
-    High,
-    Max,
-    Custom,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FpsSetting {
-    Auto,
-    Fixed(u32),
-}
-
-impl Serialize for FpsSetting {
-    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        match self {
-            FpsSetting::Auto => s.serialize_str("auto"),
-            FpsSetting::Fixed(v) => s.serialize_u32(*v),
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for FpsSetting {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let value = serde_json::Value::deserialize(d)?;
-        match value {
-            serde_json::Value::String(s) if s == "auto" => Ok(FpsSetting::Auto),
-            serde_json::Value::Number(n) => match n.as_u64() {
-                Some(v @ (30 | 60 | 90 | 120)) => Ok(FpsSetting::Fixed(v as u32)),
-                _ => Err(serde::de::Error::custom("unsupported fps")),
-            },
-            _ => Err(serde::de::Error::custom("invalid fps")),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct VideoSettings {
-    pub profile: LatencyProfile,
-    pub resolution: ResolutionMode,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub custom_width: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub custom_height: Option<u32>,
-    pub fps: FpsSetting,
-    pub bitrate: BitrateMode,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub custom_kbps: Option<u32>,
-    pub codec: CodecSetting,
-}
-
-impl Default for VideoSettings {
-    fn default() -> Self {
-        Self {
-            // 1080p H.264 at 60 FPS: every iPad decodes it in hardware, and a
-            // 30 FPS stream alone added up to ~50 ms of frame waiting and
-            // display time to every interaction. Higher modes remain explicit.
-            profile: LatencyProfile::Balanced,
-            resolution: ResolutionMode::P1080,
-            custom_width: None,
-            custom_height: None,
-            fps: FpsSetting::Fixed(60),
-            bitrate: BitrateMode::Auto,
-            custom_kbps: None,
-            codec: CodecSetting::H264,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
-pub enum EncoderPreference {
-    /// Hardware first (NVENC, Quick Sync, AMF via Media Foundation), software fallback.
-    Auto,
-    HardwareOnly,
-    Software,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
 pub enum PenMode {
     /// Native Windows Ink pen with pressure and tilt.
     WindowsInk,
@@ -173,15 +29,11 @@ pub struct NetworkSettings {
     pub mode: NetworkMode,
     pub https_port: u16,
     pub advertise_mdns: bool,
-    /// Allow "Nearby computers → Connect" pairing requests without a code (PC confirmation is still required).
-    pub allow_nearby_pairing: bool,
     /// Vision-Pro relay used in Remote Access mode, normalized to `wss://host[:port]`.
     pub relay_url: Option<String>,
     /// Access token required by private relays.
     pub relay_token: Option<String>,
-    /// STUN servers used only in Remote Access mode.
-    pub stun_servers: Vec<String>,
-    /// Detect tablets plugged in with a cable and stream to them over that cable.
+    /// Detect tablets plugged in with a cable and carry their sessions over that cable.
     pub usb_direct: bool,
 }
 
@@ -191,10 +43,8 @@ impl Default for NetworkSettings {
             mode: NetworkMode::LocalOnly,
             https_port: 47800,
             advertise_mdns: true,
-            allow_nearby_pairing: true,
             relay_url: None,
             relay_token: None,
-            stun_servers: vec![],
             usb_direct: true,
         }
     }
@@ -228,25 +78,6 @@ impl Default for SecuritySettings {
             pairing_timeout_seconds: 120,
             notify_on_connect: true,
             emergency_shortcut: "Ctrl+Alt+Shift+Backspace".into(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", default)]
-pub struct StreamingSettings {
-    pub video: VideoSettings,
-    pub encoder: EncoderPreference,
-    /// Allow iPads to change quality settings during a session.
-    pub allow_client_overrides: bool,
-}
-
-impl Default for StreamingSettings {
-    fn default() -> Self {
-        Self {
-            video: VideoSettings::default(),
-            encoder: EncoderPreference::Auto,
-            allow_client_overrides: true,
         }
     }
 }
@@ -320,7 +151,6 @@ pub struct Settings {
     pub computer_name: String,
     pub network: NetworkSettings,
     pub security: SecuritySettings,
-    pub streaming: StreamingSettings,
     pub input: InputSettings,
     pub display: DisplaySettings,
     pub advanced: AdvancedSettings,
@@ -329,11 +159,10 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            schema: 3,
+            schema: 4,
             computer_name: default_computer_name(),
             network: NetworkSettings::default(),
             security: SecuritySettings::default(),
-            streaming: StreamingSettings::default(),
             input: InputSettings::default(),
             display: DisplaySettings::default(),
             advanced: AdvancedSettings::default(),
@@ -366,11 +195,7 @@ impl Settings {
         match std::fs::read(&path) {
             Ok(bytes) => match serde_json::from_slice::<Settings>(&bytes) {
                 Ok(mut settings) => {
-                    let migrated = settings.migrate_streaming_defaults();
                     settings.sanitize();
-                    if migrated {
-                        let _ = settings.save();
-                    }
                     settings
                 }
                 Err(error) => {
@@ -387,42 +212,6 @@ impl Settings {
         paths::ensure_data_dir()?;
         let bytes = serde_json::to_vec_pretty(self).expect("settings serialize");
         paths::write_atomic(&Self::path(), &bytes)
-    }
-
-    /// Preserve manual streaming choices, but replace the exact presets that
-    /// shipped as defaults before: the balanced/auto preset (schema 1) and the
-    /// 1080p 30 FPS baseline (schema 2).
-    fn migrate_streaming_defaults(&mut self) -> bool {
-        if self.schema >= 3 {
-            return false;
-        }
-        let balanced_auto = VideoSettings {
-            profile: LatencyProfile::Balanced,
-            resolution: ResolutionMode::Auto,
-            custom_width: None,
-            custom_height: None,
-            fps: FpsSetting::Auto,
-            bitrate: BitrateMode::Auto,
-            custom_kbps: None,
-            codec: CodecSetting::Auto,
-        };
-        let baseline_30 = VideoSettings {
-            profile: LatencyProfile::Balanced,
-            resolution: ResolutionMode::P1080,
-            custom_width: None,
-            custom_height: None,
-            fps: FpsSetting::Fixed(30),
-            bitrate: BitrateMode::Auto,
-            custom_kbps: None,
-            codec: CodecSetting::H264,
-        };
-        if (self.schema < 2 && self.streaming.video == balanced_auto)
-            || self.streaming.video == baseline_30
-        {
-            self.streaming.video = VideoSettings::default();
-        }
-        self.schema = 3;
-        true
     }
 
     /// Clamps values into safe ranges regardless of what is on disk or sent by the UI.
@@ -449,19 +238,12 @@ impl Settings {
             .map(str::trim)
             .filter(|t| (16..=256).contains(&t.len()) && t.chars().all(|c| c.is_ascii_graphic()))
             .map(str::to_string);
-        self.network
-            .stun_servers
-            .retain(|s| s.starts_with("stun:") && s.len() < 256);
-        self.network.stun_servers.truncate(4);
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        BitrateMode, CodecSetting, FpsSetting, LatencyProfile, ResolutionMode, Settings,
-        StreamingSettings, VideoSettings,
-    };
+    use super::Settings;
 
     #[test]
     fn relay_settings_are_sanitized() {
@@ -493,81 +275,14 @@ mod tests {
     }
 
     #[test]
-    fn fresh_install_uses_responsive_video_quality() {
-        let video = Settings::default().streaming.video;
-        assert_eq!(video.profile, LatencyProfile::Balanced);
-        assert_eq!(video.resolution, ResolutionMode::P1080);
-        assert_eq!(video.fps, FpsSetting::Fixed(60));
-        assert_eq!(video.bitrate, BitrateMode::Auto);
-        assert_eq!(video.codec, CodecSetting::H264);
-    }
-
-    #[test]
-    fn migrates_only_the_former_balanced_auto_default() {
-        let mut settings = Settings {
-            schema: 1,
-            ..Default::default()
-        };
-        settings.streaming.video = VideoSettings {
-            profile: LatencyProfile::Balanced,
-            resolution: ResolutionMode::Auto,
-            custom_width: None,
-            custom_height: None,
-            fps: FpsSetting::Auto,
-            bitrate: BitrateMode::Auto,
-            custom_kbps: None,
-            codec: CodecSetting::Auto,
-        };
-        assert!(settings.migrate_streaming_defaults());
-        assert_eq!(settings.streaming.video, VideoSettings::default());
-
-        settings.schema = 1;
-        settings.streaming.video.resolution = ResolutionMode::P1440;
-        assert!(settings.migrate_streaming_defaults());
-        assert_eq!(settings.streaming.video.resolution, ResolutionMode::P1440);
-        assert_eq!(settings.schema, 3);
-        assert!(!settings.migrate_streaming_defaults());
-    }
-
-    /// Settings as saved by the previous version (schema 2) with this video preset.
-    fn schema_2(video: VideoSettings) -> Settings {
-        Settings {
-            schema: 2,
-            streaming: StreamingSettings {
-                video,
-                ..Default::default()
-            },
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn migrates_the_former_30_fps_baseline_but_keeps_manual_choices() {
-        let baseline_30 = VideoSettings {
-            fps: FpsSetting::Fixed(30),
-            ..VideoSettings::default()
-        };
-        let mut settings = schema_2(baseline_30);
-        assert!(settings.migrate_streaming_defaults());
-        assert_eq!(settings.streaming.video.fps, FpsSetting::Fixed(60));
-
-        // 30 FPS chosen together with another setting is a manual choice.
-        let mut settings = schema_2(VideoSettings {
-            resolution: ResolutionMode::P1440,
-            ..baseline_30
-        });
-        assert!(settings.migrate_streaming_defaults());
-        assert_eq!(settings.streaming.video.fps, FpsSetting::Fixed(30));
-
-        // A schema-2 file keeps a deliberately chosen balanced/auto preset.
-        let chosen = VideoSettings {
-            resolution: ResolutionMode::Auto,
-            fps: FpsSetting::Auto,
-            codec: CodecSetting::Auto,
-            ..VideoSettings::default()
-        };
-        let mut settings = schema_2(chosen);
-        assert!(settings.migrate_streaming_defaults());
-        assert_eq!(settings.streaming.video, chosen);
+    fn settings_from_the_streaming_versions_still_load() {
+        let older: Settings = serde_json::from_str(
+            r#"{"schema":3,"network":{"mode":"local-only","httpsPort":47800,"allowNearbyPairing":true,"stunServers":[]},
+                "streaming":{"video":{"profile":"balanced","resolution":"1080p","fps":60,"bitrate":"auto","codec":"h264"}},
+                "input":{"allowPen":false}}"#,
+        )
+        .unwrap();
+        assert!(!older.input.allow_pen);
+        assert_eq!(older.network.https_port, 47800);
     }
 }

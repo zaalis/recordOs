@@ -19,7 +19,6 @@ export const InputKind = {
   Combo: 0x09,
   ReleaseAll: 0x0a,
   /** Agent → client, realtime channel. */
-  Cursor: 0x40,
 } as const;
 
 export const MouseButton = { Left: 0, Right: 1, Middle: 2, Back: 3, Forward: 4 } as const;
@@ -176,21 +175,4 @@ export class InputEncoder {
     this.header(new DataView(buf), InputKind.ReleaseAll);
     return buf;
   }
-}
-
-export interface CursorUpdate {
-  x: number;
-  y: number;
-  shapeId: number;
-  visible: boolean;
-}
-
-export function decodeCursor(data: ArrayBuffer): CursorUpdate | null {
-  if (data.byteLength !== 20) return null;
-  const view = new DataView(data);
-  if (view.getUint8(0) !== InputKind.Cursor) return null;
-  const x = view.getFloat32(4, true);
-  const y = view.getFloat32(8, true);
-  if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
-  return { x, y, shapeId: view.getUint32(12, true), visible: view.getUint8(16) === 1 };
 }

@@ -8,11 +8,10 @@
  *               three-finger swipe = configurable action.
  * Pencil:       Apple Pencil is a Windows Ink pen (pressure, tilt, hover); fingers navigate.
  *
- * Every event is sent the moment it happens. Nothing waits for a video frame.
+ * Every event is sent the moment it happens.
  */
 import { InputEncoder, MouseButton, PenButtons, PenPhase, VK, type MouseButtonId } from '@vision-pro/protocol';
 import type { ControlMode, Preferences } from '../lib/storage.ts';
-import type { ViewTransform } from './view.ts';
 
 export interface InputSink {
   reliable(buffer: ArrayBuffer): void;
@@ -22,7 +21,6 @@ export interface InputSink {
 export interface InputCallbacks {
   onToggleInterface(): void;
   onFeedback(kind: 'tap' | 'right' | 'drag', clientX: number, clientY: number): void;
-  onLocalCursorMove(dx: number, dy: number): void;
   onUndo(): void;
   onRedo(): void;
   onActivity(): void;
@@ -57,7 +55,8 @@ type Gesture =
   | 'three-done'
   | 'track'
   | 'track-drag'
-  | 'pan';
+  /** Fingers resting on the tablet while the Pencil draws: ignored. */
+  | 'rest';
 
 const SLOP = 10;
 const LONG_PRESS_MS = 480;
@@ -70,7 +69,6 @@ type Settings = Pick<
   | 'scrollSpeed'
   | 'naturalScrolling'
   | 'tapToClick'
-  | 'pinchAction'
   | 'threeFingerSwipe'
   | 'pencilWindowsInk'
   | 'pencilHover'
@@ -106,7 +104,6 @@ export class InputController {
     private readonly surface: HTMLElement,
     private readonly contentRect: () => DOMRect | null,
     private readonly sink: InputSink,
-    private readonly view: ViewTransform,
     private settings: Settings,
     private readonly callbacks: InputCallbacks,
     /** Native viewport navigation scheme of the foreground creative application. */
@@ -236,11 +233,6 @@ export class InputController {
     return this.threeDNavigation !== 'none' && (this.mode !== 'pencil' || this.settings.pencilFingers === 'touch');
   }
 
-  private stagePoint(clientX: number, clientY: number): { x: number; y: number } {
-    const rect = this.surface.getBoundingClientRect();
-    return { x: clientX - rect.left, y: clientY - rect.top };
-  }
-
   // ---------------------------------------------------------------------------
   // Pointer routing
   // ---------------------------------------------------------------------------
@@ -284,7 +276,7 @@ export class InputController {
         this.dragArmed = now - this.lastTap.t < 320 && Math.hypot(e.clientX - this.lastTap.x, e.clientY - this.lastTap.y) < 40;
         this.gesture = 'track';
       } else {
-        this.gesture = 'pan';
+        this.gesture = 'rest';
       }
     } else if (count === 2) {
       window.clearTimeout(this.longPressTimer);
@@ -357,8 +349,7 @@ export class InputController {
         this.relativeMove(dx, dy, e.timeStamp);
         return;
       }
-      case 'pan':
-        this.view.panBy(p.x - prevX, p.y - prevY);
+      case 'rest':
         return;
       case 'two':
       case 'scroll':
@@ -392,15 +383,16 @@ export class InputController {
     if (this.gesture === 'two') {
       const pinchDelta = Math.abs(dist - this.twoStart.dist);
       const panDelta = Math.hypot(c.x - this.twoStart.cx, c.y - this.twoStart.cy);
-      const navigateOnly = this.mode === 'pencil' && this.settings.pencilFingers === 'navigate';
+      // Two fingers navigate the application under the Pencil: pinch zooms it (Ctrl+wheel, or
+      // the 3D viewport's own zoom), a two-finger drag scrolls or pans it.
       if (pinchDelta > 18 && pinchDelta > panDelta * 0.6) {
         this.gesture = 'pinch';
-        if (!navigateOnly && this.settings.pinchAction === 'zoom-app' && this.threeDNavigation === 'none') {
+        if (this.threeDNavigation === 'none') {
           this.sink.reliable(this.encoder.key(VK.Ctrl, true));
           this.ctrlForPinch = true;
         }
       } else if (panDelta > 8) {
-        this.gesture = navigateOnly ? 'pinch' : this.threeDNavigation !== 'none' ? 'pan-3d' : 'scroll';
+        this.gesture = this.threeDNavigation !== 'none' ? 'pan-3d' : 'scroll';
         if (this.gesture === 'pan-3d') this.begin3DGesture('pan', c);
       } else {
         return;
@@ -412,18 +404,10 @@ export class InputController {
     const dx = c.x - this.lastCentroid.x;
     const dy = c.y - this.lastCentroid.y;
     if (this.gesture === 'pinch') {
-      const navigateOnly = this.mode === 'pencil' && this.settings.pencilFingers === 'navigate';
-      if (!navigateOnly && (this.settings.pinchAction === 'zoom-app' || this.threeDNavigation !== 'none')) {
-        const ratio = dist / Math.max(1, this.lastDist);
-        if (Math.abs(ratio - 1) > 0.04) {
-          const n = this.normalize(c.x, c.y);
-          this.sink.reliable(this.encoder.wheel(0, ratio > 1 ? -120 : 120, n.x, n.y, false));
-          this.lastDist = dist;
-        }
-      } else {
-        const point = this.stagePoint(c.x, c.y);
-        this.view.zoomAt(point.x, point.y, dist / Math.max(1, this.lastDist));
-        this.view.panBy(dx, dy);
+      const ratio = dist / Math.max(1, this.lastDist);
+      if (Math.abs(ratio - 1) > 0.04) {
+        const n = this.normalize(c.x, c.y);
+        this.sink.reliable(this.encoder.wheel(0, ratio > 1 ? -120 : 120, n.x, n.y, false));
         this.lastDist = dist;
       }
     } else if (this.gesture === 'scroll') {
@@ -466,10 +450,9 @@ export class InputController {
     this.lastMoveAt = timeStamp;
     const acceleration = 1 + Math.min(2.5, speed * 1.4);
     const gain = this.settings.trackingSpeed * acceleration;
-    const nx = (dx * gain) / Math.max(1, rect.width / this.view.state.scale);
-    const ny = (dy * gain) / Math.max(1, rect.height / this.view.state.scale);
+    const nx = (dx * gain) / Math.max(1, rect.width);
+    const ny = (dy * gain) / Math.max(1, rect.height);
     this.sink.realtime(this.encoder.moveRel(nx, ny));
-    this.callbacks.onLocalCursorMove(nx, ny);
   }
   private lastMoveAt = 0;
 
@@ -750,12 +733,6 @@ export class InputController {
     e.preventDefault();
     if (!this.enabled) return;
     this.callbacks.onActivity();
-    if (e.ctrlKey && this.settings.pinchAction === 'zoom-view') {
-      // Trackpad pinch on iPadOS arrives as ctrl+wheel.
-      const point = this.stagePoint(e.clientX, e.clientY);
-      this.view.zoomAt(point.x, point.y, Math.exp(-e.deltaY / 120));
-      return;
-    }
     const scale = e.deltaMode === 1 ? 40 : e.deltaMode === 2 ? 400 : 1;
     const n = this.normalize(e.clientX, e.clientY);
     this.sink.reliable(this.encoder.wheel(e.deltaX * scale * 1.2, e.deltaY * scale * 1.2, n.x, n.y, true));

@@ -1,21 +1,16 @@
-//! Windows integration: DPAPI, screen capture, hardware encoding, input injection, app detection.
+//! Windows integration: DPAPI, display enumeration, input injection, app detection, USB links.
 
-pub mod capture;
-pub mod convert;
+pub mod displays;
 pub mod dpapi;
 pub mod engine;
-pub mod gpu;
 pub mod inject;
-pub mod mf_encoder;
-pub mod pipeline;
-pub mod sw_encoder;
 pub mod system;
 pub mod usb;
 
-use crate::media::MediaEngine;
+use crate::control::ControlEngine;
 use std::sync::Arc;
 
-/// Media engine for this system.
-pub fn media_engine() -> Arc<dyn MediaEngine> {
-    Arc::new(engine::WindowsMediaEngine::new())
+/// Control engine for this system.
+pub fn control_engine() -> Arc<dyn ControlEngine> {
+    Arc::new(engine::WindowsControlEngine::new())
 }

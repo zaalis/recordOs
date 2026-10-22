@@ -1,6 +1,7 @@
 /**
- * Signaling client: runs the Vision-Pro handshake over a WebSocket and exposes an encrypted
- * message channel. Used by the iPad app and by end-to-end tests (Node's global WebSocket).
+ * Session client: runs the Vision-Pro handshake over a WebSocket and exposes the encrypted
+ * message channel (control and input). Used by the iPad app and by end-to-end tests (Node's
+ * global WebSocket).
  */
 import { PROTOCOL_VERSION } from './constants.ts';
 import {
@@ -30,10 +31,10 @@ export interface SignalingOptions {
   deviceName: string;
   deviceKind: DeviceKind;
   mode: 'pair' | 'auth';
-  /** Pinned agent fingerprint (known PC or QR code). Strongly recommended. */
+  /** Pinned agent fingerprint (known PC). Strongly recommended. */
   expectedFingerprint?: string;
-  /** One-time secret from a QR code or the 6-digit code shown on the PC. */
-  proof?: { kind: 'qr' | 'code'; secret: string };
+  /** The 6-digit code shown on the PC ("Connect Device"). Required to pair. */
+  proof?: { kind: 'code'; secret: string };
   WebSocketImpl?: typeof WebSocket;
 }
 
@@ -119,6 +120,16 @@ export class SignalingClient {
     this.socket?.send(JSON.stringify(message));
   }
 
+  /** The encrypted channel is open: messages can be sent. */
+  get open(): boolean {
+    return this.stage === 'secure' && this.socket?.readyState === 1;
+  }
+
+  /** Bytes accepted by the socket but not yet sent (latest-wins input is skipped while it grows). */
+  get bufferedAmount(): number {
+    return this.socket?.bufferedAmount ?? 0;
+  }
+
   async send(message: { t: string } & Record<string, unknown>): Promise<void> {
     if (!this.channel || this.stage !== 'secure') throw new Error('channel not ready');
     const frames = await this.channel.seal(message);
@@ -194,7 +205,7 @@ export class SignalingClient {
         this.stage = 'secure';
         this.clearHandshakeTimer();
         // Authentication must also complete; reaching the encrypted channel
-        // alone is not enough to start video. Pairing gets its approval window.
+        // alone is not enough. Pairing gets the PC's approval window.
         this.handshakeTimer = setTimeout(() => this.fail('unreachable'), this.options.mode === 'pair' ? 90_000 : 20_000);
         if (this.options.mode === 'pair') {
           const proof = this.options.proof

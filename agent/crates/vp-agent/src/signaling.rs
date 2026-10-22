@@ -1,5 +1,5 @@
-//! Signaling session: authenticated key exchange, authorization (pairing / trusted device),
-//! then an end-to-end encrypted control channel that negotiates WebRTC.
+//! Session: authenticated key exchange, authorization (pairing code / trusted device), then an
+//! end-to-end encrypted channel that carries the iPad's input and the PC's state updates.
 //!
 //! Handshake (see docs/PROTOCOL.md):
 //!   S→C hello{agentPub, commit}   C→S init{clientEph, nC, devicePub…}
@@ -7,10 +7,10 @@
 //! Every failure is counted per source address and can trigger a lockout.
 
 use crate::agent::Core;
+use crate::control::{ControlHandle, InputGate, InputPolicy};
 use crate::crypto::{self, EncryptedFrame, Role, SecureChannel};
 use crate::events::{AgentEvent, PairingRequestInfo};
-use crate::media::{MediaContext, MediaHandle, MediaRequest};
-use crate::protocol::{ClientInit, ClientProve, DeviceRotate, PairRequest, RtcOffer};
+use crate::protocol::{ClientInit, ClientProve, ControlToAgent, DeviceRotate, PairRequest};
 use crate::security::Severity;
 use crate::session::{AuthorizationEpoch, EndReason, Link, SessionCommand, SessionInfo};
 use crate::store::{DeviceStatus, Permission};
@@ -29,8 +29,7 @@ const STEP_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_FRAME: usize = 96 * 1024;
 const SIGNAL_SEND_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// How the iPad reached this PC. Relayed sessions come from the Internet: pairing always needs
-/// a code or QR proof, and media goes through the relay's TURN service.
+/// How the iPad reached this PC. Relayed sessions come from the Internet through the relay.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Route {
     Direct,
@@ -262,7 +261,6 @@ async fn session<T: SignalTransport>(
     let server_nonce = random_bytes::<32>();
     let commit = crypto::commit(&server_eph_raw, &server_nonce);
     let window_open = core.pairing.window().is_some();
-    let nearby_pairing = settings.network.allow_nearby_pairing && route == Route::Direct;
     ctx.send_plain(json!({
         "t": "hello",
         "v": crate::protocol::PROTOCOL_VERSION,
@@ -270,7 +268,7 @@ async fn session<T: SignalTransport>(
         "agentName": settings.computer_name,
         "agentPub": b64u(identity.public_raw()),
         "commit": b64u(&commit),
-        "pairing": { "nearby": nearby_pairing, "code": window_open, "qr": window_open },
+        "pairing": { "code": window_open },
     }))
     .await?;
 
@@ -416,28 +414,67 @@ async fn session<T: SignalTransport>(
                 ctx.penalize("invalid pair request");
                 return Err(ctx.fail("protocol", None).await);
             };
-            let method = match request.proof {
-                Some(proof) => match core
-                    .pairing
-                    .verify_proof(&proof.kind, &proof.mac, &transcript)
-                {
-                    Ok(method) => method,
-                    Err(_) => {
-                        ctx.penalize("invalid pairing proof");
-                        core.audit
-                            .record(
-                                Severity::Warning,
-                                "pair.bad-proof",
-                                "Rejected a pairing attempt with an invalid code.",
-                            )
-                            .ip(ip);
-                        return Err(ctx.fail("denied", None).await);
+            // The code shown on this PC is the PC user's consent: a valid proof pairs at once.
+            let Some(proof) = request.proof else {
+                return Err(ctx.fail("pairing_disabled", None).await);
+            };
+            if let Err(error) = core
+                .pairing
+                .verify_proof(&proof.kind, &proof.mac, &transcript)
+            {
+                ctx.penalize("invalid pairing proof");
+                core.audit
+                    .record(
+                        Severity::Warning,
+                        "pair.bad-proof",
+                        "Rejected a pairing attempt with an invalid code.",
+                    )
+                    .ip(ip);
+                let code = match error {
+                    crate::pairing::ProofError::NoWindow => "pairing_disabled",
+                    crate::pairing::ProofError::CodeExhausted => "code_expired",
+                    crate::pairing::ProofError::Invalid => "bad_code",
+                };
+                return Err(ctx.fail(code, None).await);
+            }
+            let persisted = core.sessions.with_current_authorization(
+                &init.device_id,
+                authorization_epoch,
+                || {
+                    let mut devices = core.devices.write();
+                    devices.insert_paired(
+                        &init.device_id,
+                        &device_name,
+                        &init.device_kind,
+                        &device_pub,
+                        "code",
+                        &ip.to_string(),
+                    );
+                    if let Err(error) = devices.save(&identity) {
+                        tracing::error!(%error, "failed to persist device store");
                     }
                 },
-                None if nearby_pairing => "nearby",
-                None => return Err(ctx.fail("pairing_disabled", None).await),
-            };
-            needs_approval = Some(method);
+            );
+            if persisted.is_none() {
+                return Err(Abort::Closed);
+            }
+            core.pairing.consume_code();
+            core.audit
+                .record(
+                    Severity::Notice,
+                    "pair.approved",
+                    format!("{device_name} is now a trusted device (code)."),
+                )
+                .ip(ip)
+                .device(&init.device_id, &device_name);
+            let _ = core.events.send(AgentEvent::DevicesChanged);
+            let _ = core.events.send(AgentEvent::ConnectWindowChanged);
+            send_secure(
+                ctx.transport,
+                &mut channel,
+                json!({ "t": "pair.result", "approved": true }),
+            )
+            .await?;
         }
         _ => {
             ctx.penalize("invalid mode");
@@ -551,27 +588,13 @@ async fn session<T: SignalTransport>(
             core.sessions
                 .with_current_authorization(&init.device_id, authorization_epoch, || {
                     let mut devices = core.devices.write();
-                    if method == "reconfirm" {
-                        devices.set_trusted(&init.device_id);
-                    } else {
-                        devices.insert_paired(
-                            &init.device_id,
-                            &device_name,
-                            &init.device_kind,
-                            &device_pub,
-                            method,
-                            &ip.to_string(),
-                        );
-                    }
+                    devices.set_trusted(&init.device_id);
                     if let Err(error) = devices.save(&identity) {
                         tracing::error!(%error, "failed to persist device store");
                     }
                 });
         if persisted.is_none() {
             return Err(Abort::Closed);
-        }
-        if method == "qr" {
-            core.pairing.consume_token();
         }
         core.audit
             .record(
@@ -608,14 +631,25 @@ async fn session<T: SignalTransport>(
     .await
 }
 
-/// Stopping media joins the capture thread; keep the other async workers running meanwhile.
-fn stop_media(handle: &mut Box<dyn MediaHandle>) {
+/// Largest input message: a 256-unit TEXT event (6 + 512 bytes).
+const MAX_INPUT_BYTES: usize = 1024;
+
+/// Stopping the control handle joins the input thread; keep the other async workers running.
+fn stop_control(handle: Box<dyn ControlHandle>) {
     match tokio::runtime::Handle::try_current().map(|h| h.runtime_flavor()) {
         Ok(tokio::runtime::RuntimeFlavor::MultiThread) => {
-            tokio::task::block_in_place(|| handle.stop())
+            tokio::task::block_in_place(|| drop(handle))
         }
-        _ => handle.stop(),
+        _ => drop(handle),
     }
+}
+
+/// Decodes the payload of an `in`/`rt` message.
+fn input_bytes(data: &str) -> Option<Vec<u8>> {
+    if data.len() > MAX_INPUT_BYTES * 4 / 3 + 4 {
+        return None;
+    }
+    from_b64u(data, None).filter(|bytes| bytes.len() <= MAX_INPUT_BYTES)
 }
 
 /// Resolves when the transport closes (used while waiting for an approval).
@@ -661,29 +695,29 @@ async fn run_session<T: SignalTransport>(
         IpAddr::V4(v4) => Some(v4),
         IpAddr::V6(v6) => v6.to_ipv4_mapped(),
     });
-    // The TURN credential outlives the whole session so allocations can be refreshed until it ends.
-    let relay_media = match route {
-        Route::Direct => None,
-        Route::Relay => {
-            let ttl = settings.security.session_max_minutes as u64 * 60 + 600;
-            match core.relay.issue(ttl).await {
-                Ok(credential) => Some(credential),
-                Err(error) => {
-                    core.audit.record(
-                        Severity::Warning,
-                        "relay.media-unavailable",
-                        format!("A relayed session could not start: {error}"),
-                    );
-                    let end = json!({ "t": "session.end", "reason": "error" });
-                    let _ = send_secure(transport, &mut channel, end).await;
-                    return Err(Abort::Client("relay"));
-                }
-            }
-        }
-    };
     let record = core.devices.read().get(&init.device_id).cloned();
     let Some(record) = record else {
         return Err(Abort::Client("device vanished"));
+    };
+
+    // Input goes to the display chosen on the PC; the injector lives as long as the session.
+    let engine = core.control.clone();
+    let start_settings = settings.clone();
+    let control = match tokio::task::spawn_blocking(move || engine.start(&start_settings)).await {
+        Ok(Ok(control)) => control,
+        Ok(Err(error)) => {
+            core.audit
+                .record(
+                    Severity::Warning,
+                    "control.error",
+                    format!("Remote control could not start: {error}"),
+                )
+                .device(&record.id, &record.name);
+            let end = json!({ "t": "session.end", "reason": "error" });
+            let _ = send_secure(transport, &mut channel, end).await;
+            return Err(Abort::Client("control"));
+        }
+        Err(_) => return Err(Abort::Client("control")),
     };
 
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<SessionCommand>(8);
@@ -697,9 +731,7 @@ async fn run_session<T: SignalTransport>(
             ip: ip.to_string(),
             started_at: now_ms(),
             permission: record.permission,
-            streaming: false,
-            video: None,
-            stats: None,
+            input_rate: 0.0,
             rtt_ms: None,
             active_app: None,
             via_relay: route == Route::Relay,
@@ -711,9 +743,7 @@ async fn run_session<T: SignalTransport>(
         authorization_epoch,
     );
     let Some(info) = info else {
-        if let Some(credential) = &relay_media {
-            core.relay.close_route(credential.peer);
-        }
+        stop_control(control);
         return Err(Abort::Client("disconnected before session start"));
     };
     {
@@ -740,8 +770,11 @@ async fn run_session<T: SignalTransport>(
     let control_allowed = Arc::new(AtomicBool::new(record.permission == Permission::Control));
     let max_duration = Duration::from_secs(settings.security.session_max_minutes as u64 * 60);
     let expires_at = now_ms() + max_duration.as_millis() as u64;
+    let policy = InputPolicy::from_settings(&settings);
 
     let result = async {
+        let mut caps = core.control.capabilities();
+        (caps.displays, caps.active_display_id) = control.displays();
         let mut ready = json!({
             "t": "session.ready",
             "sessionId": session_id,
@@ -752,7 +785,7 @@ async fn run_session<T: SignalTransport>(
                 "version": crate::VERSION,
                 "hostname": core.hostname,
             },
-            "caps": core.media.capabilities(),
+            "caps": caps,
             "expiresAt": expires_at,
             "link": link,
         });
@@ -767,15 +800,13 @@ async fn run_session<T: SignalTransport>(
         if let Some(url) = core.relay.public_url() {
             ready["relay"] = json!({ "url": url });
         }
-        if let Some(credential) = &relay_media {
-            ready["ice"] = json!({
-                "iceServers": [{ "urls": credential.urls, "username": credential.username, "credential": credential.credential }],
-                "iceTransportPolicy": "relay",
-            });
-        }
         send_secure(transport, &mut channel, ready).await?;
 
-        let mut media: Option<Box<dyn MediaHandle>> = None;
+        let mut gate = InputGate::default();
+        let mut app_watch = false;
+        let mut last_app: Option<String> = None;
+        let mut ticker = tokio::time::interval(Duration::from_millis(500));
+        let mut rate_window = Instant::now();
         let deadline = Instant::now() + max_duration;
         let reason = loop {
             tokio::select! {
@@ -803,55 +834,6 @@ async fn run_session<T: SignalTransport>(
                     };
                     match message["t"].as_str() {
                         Some("__rekey") => {}
-                        Some("rtc.offer") => {
-                            let offer = match serde_json::from_value::<RtcOffer>(message) {
-                                Ok(o) if o.t == "rtc.offer" && o.validate().is_ok() => o,
-                                _ => {
-                                    core.guard.record_failure(ip);
-                                    break EndReason::Error;
-                                }
-                            };
-                            if let Some(mut old) = media.take() {
-                                stop_media(&mut old);
-                            }
-                            let context = MediaContext {
-                                control_allowed: control_allowed.clone(),
-                                info: info.clone(),
-                                settings: core.settings.read().clone(),
-                                on_change: {
-                                    let events = core.events.clone();
-                                    Arc::new(move || { let _ = events.send(AgentEvent::SessionsChanged); })
-                                },
-                            };
-                            let request = MediaRequest {
-                                offer,
-                                session_id: session_id.to_string(),
-                                device_name: record.name.clone(),
-                                relay: relay_media.as_ref().map(|c| core.relay.open_route(c.peer)),
-                                bind: if link == Link::Usb { local_v4 } else { None },
-                                exclude: if link == Link::Lan { core.usb.read().local_ips() } else { vec![] },
-                            };
-                            let engine = core.media.clone();
-                            let started = tokio::task::spawn_blocking(move || engine.start(request, context)).await;
-                            match started {
-                                Ok(Ok(started)) => {
-                                    {
-                                        let mut i = info.write();
-                                        i.streaming = true;
-                                        i.video = Some(started.applied.clone());
-                                    }
-                                    let _ = core.events.send(AgentEvent::SessionsChanged);
-                                    send_secure(transport, &mut channel, json!({ "t": "rtc.answer", "sdp": started.answer_sdp, "video": started.applied })).await?;
-                                    media = Some(started.handle);
-                                }
-                                Ok(Err(error)) => {
-                                    tracing::error!(%error, "media start failed");
-                                    core.audit.record(Severity::Warning, "media.error", format!("Streaming could not start: {error}")).device(&record.id, &record.name);
-                                    send_secure(transport, &mut channel, json!({ "t": "rtc.error", "message": "The PC could not start streaming." })).await?;
-                                }
-                                Err(_) => break EndReason::Error,
-                            }
-                        }
                         Some("session.close") => break EndReason::User,
                         Some("device.rotate") => {
                             let Ok(rotate) = serde_json::from_value::<DeviceRotate>(message) else { break EndReason::Error };
@@ -886,14 +868,56 @@ async fn run_session<T: SignalTransport>(
                             }
                         }
                         _ => {
-                            core.guard.record_failure(ip);
-                            break EndReason::Error;
+                            let Ok(command) = serde_json::from_value::<ControlToAgent>(message) else {
+                                core.guard.record_failure(ip);
+                                break EndReason::Error;
+                            };
+                            match command {
+                                ControlToAgent::Input { d } | ControlToAgent::Realtime { d }
+                                    if !control_allowed.load(Ordering::Relaxed) || d.is_empty() => {}
+                                ControlToAgent::Input { d } => {
+                                    match input_bytes(&d) {
+                                        Some(bytes) => if let Some(event) = gate.admit(&bytes, false, &policy) { control.inject(event) },
+                                        None => gate.invalid += 1,
+                                    }
+                                }
+                                ControlToAgent::Realtime { d } => {
+                                    match input_bytes(&d) {
+                                        Some(bytes) => if let Some(event) = gate.admit(&bytes, true, &policy) { control.inject(event) },
+                                        None => gate.invalid += 1,
+                                    }
+                                }
+                                ControlToAgent::Ping { id, t0, rtt_ms } => {
+                                    if let Some(rtt) = rtt_ms.filter(|r| r.is_finite() && (0.0..60_000.0).contains(r)) {
+                                        info.write().rtt_ms = Some(rtt);
+                                    }
+                                    send_secure(transport, &mut channel, json!({ "t": "pong", "id": id, "t0": t0, "agentMs": now_ms() })).await?;
+                                }
+                                ControlToAgent::DisplaySelect { display_id } => {
+                                    if display_id.len() <= 64 && control.select_display(&display_id) {
+                                        let (displays, active) = control.displays();
+                                        send_secure(transport, &mut channel, json!({ "t": "displays", "displays": displays, "activeId": active })).await?;
+                                    }
+                                }
+                                ControlToAgent::AppWatch { enabled } => {
+                                    app_watch = enabled && settings.input.detect_active_app;
+                                    last_app = None;
+                                }
+                            }
+                            if gate.exhausted() {
+                                tracing::warn!("too many invalid input messages; ending session");
+                                core.guard.record_failure(ip);
+                                break EndReason::Error;
+                            }
                         }
                     }
                 }
                 command = cmd_rx.recv() => match command {
                     Some(SessionCommand::SetPermission(permission)) => {
                         control_allowed.store(permission == Permission::Control, Ordering::SeqCst);
+                        if permission != Permission::Control {
+                            control.inject(crate::input::InputEvent::ReleaseAll);
+                        }
                         info.write().permission = permission;
                         let _ = core.events.send(AgentEvent::SessionsChanged);
                         send_secure(transport, &mut channel, json!({ "t": "session.permission", "control": permission == Permission::Control })).await?;
@@ -905,12 +929,28 @@ async fn run_session<T: SignalTransport>(
                     }
                     None => break EndReason::Shutdown,
                 },
+                _ = ticker.tick() => {
+                    let elapsed = rate_window.elapsed();
+                    if elapsed >= Duration::from_secs(1) {
+                        info.write().input_rate = gate.accepted as f32 / elapsed.as_secs_f32();
+                        gate.accepted = 0;
+                        rate_window = Instant::now();
+                        let _ = core.events.send(AgentEvent::SessionsChanged);
+                    }
+                    if app_watch {
+                        let exe = crate::platform::system::foreground_executable();
+                        if exe != last_app {
+                            if let Some(name) = &exe {
+                                info.write().active_app = Some(name.clone());
+                                send_secure(transport, &mut channel, json!({ "t": "app.active", "exe": name, "profile": crate::platform::system::profile_for(name) })).await?;
+                            }
+                            last_app = exe;
+                        }
+                    }
+                }
                 _ = tokio::time::sleep_until(deadline) => break EndReason::Expired,
             }
         };
-        if let Some(mut handle) = media.take() {
-            stop_media(&mut handle);
-        }
         let _ = timeout(
             Duration::from_secs(1),
             send_secure(
@@ -924,9 +964,8 @@ async fn run_session<T: SignalTransport>(
     }
     .await;
 
-    if let Some(credential) = &relay_media {
-        core.relay.close_route(credential.peer);
-    }
+    // Dropping the injector releases every key, button, pen and touch contact still held.
+    stop_control(control);
     core.sessions.unregister(session_id);
     let _ = core.events.send(AgentEvent::SessionsChanged);
     let reason = result.as_ref().map(|r| r.as_str()).unwrap_or("closed");

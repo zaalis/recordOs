@@ -1,7 +1,6 @@
 //! Registry of active sessions. Each session is owned by its signaling task; the registry only keeps
 //! a command channel (to end it instantly) and a shared, UI-facing snapshot.
 
-use crate::protocol::{AgentStats, AppliedVideo};
 use crate::store::Permission;
 use parking_lot::{Mutex, RwLock};
 use serde::Serialize;
@@ -102,9 +101,9 @@ pub struct SessionInfo {
     pub ip: String,
     pub started_at: u64,
     pub permission: Permission,
-    pub streaming: bool,
-    pub video: Option<AppliedVideo>,
-    pub stats: Option<AgentStats>,
+    /// Input events received per second (last second).
+    pub input_rate: f32,
+    /// Round trip measured by the iPad.
     pub rtt_ms: Option<f32>,
     pub active_app: Option<String>,
     pub via_relay: bool,
@@ -338,9 +337,7 @@ mod tests {
             ip: "192.168.1.5".to_string(),
             started_at: 1,
             permission: Permission::View,
-            streaming: false,
-            video: None,
-            stats: None,
+            input_rate: 0.0,
             rtt_ms: None,
             active_app: None,
             via_relay: false,

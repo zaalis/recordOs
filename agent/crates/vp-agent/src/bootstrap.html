@@ -34,12 +34,12 @@
 <main>
   <p class="brand">Vision-Pro</p>
   <h1>Préparer cet iPad</h1>
-  <p class="lead">Cette étape unique permet à votre iPad de vérifier la connexion sécurisée avec <b>{{NAME}}</b>. Le certificat fonctionne uniquement sur votre réseau local.</p>
-  <ol>
+  <p class="lead">Une seule fois par iPad : le profil permet à cet iPad de vérifier la connexion chiffrée avec <b>{{NAME}}</b>. Il ne vaut que pour votre réseau local et votre réseau Tailscale.</p>
+  <ol id="steps" hidden>
     <li><span class="n">1</span><div><b>Télécharger le profil</b><small>Appuyez sur « Télécharger le profil » puis sur Autoriser.</small></div></li>
     <li><span class="n">2</span><div><b>L’installer</b><small>Réglages → Profil téléchargé → Installer.</small></div></li>
     <li><span class="n">3</span><div><b>Activer la confiance totale</b><small>Réglages → Général → Informations → Réglages de confiance des certificats → Autorité locale Vision-Pro.</small></div></li>
-    <li><span class="n">4</span><div><b>Revenir puis continuer</b><small>Vision-Pro s’ouvre et demande l’autorisation du PC.</small></div></li>
+    <li><span class="n">4</span><div><b>Revenir ici</b><small>Vision-Pro s’ouvre tout seul : entrez le code affiché sur le PC.</small></div></li>
   </ol>
   <p class="status" id="status"><span class="dot"></span><span id="status-text">Vérification de la connexion sécurisée…</span></p>
   <div class="actions">

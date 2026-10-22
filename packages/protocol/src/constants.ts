@@ -1,11 +1,11 @@
 export const PRODUCT_NAME = 'Vision-Pro';
 export const PROTOCOL_VERSION = 1;
 
-/** Default local ports. Everything is LAN-only unless Remote Access is enabled on the PC. */
+/** Default local ports. Everything stays on the LAN (or Tailscale) unless Remote Access is enabled on the PC. */
 export const PORTS = {
-  /** HTTPS + WSS: serves the web app and the signaling channel. */
+  /** HTTPS + WSS: serves the web app and the session channel. */
   https: 47800,
-  /** Plain HTTP bootstrap. Only open while "Connect Device" is showing on the PC. Serves the trust profile. */
+  /** Plain HTTP setup page. Only open while "Connect Device" is showing on the PC. Serves the trust profile. */
   bootstrap: 47801,
   /** Loopback-only developer endpoint (disabled by default). */
   devLoopback: 47802,
@@ -45,10 +45,3 @@ export const LABEL = {
 } as const;
 
 export const DIRECTION = { c2s: 1, s2c: 2 } as const;
-
-/** WebRTC data channel labels. */
-export const CHANNEL = {
-  control: 'vp-control',
-  input: 'vp-input',
-  inputRealtime: 'vp-input-rt',
-} as const;

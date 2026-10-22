@@ -1,6 +1,7 @@
 //! Local trust: a per-installation, name-constrained root authority (only valid for `.local`,
-//! `localhost` and private IP ranges) issues a short-lived TLS 1.3 server certificate.
-//! The iPad trusts the authority once (configuration profile); nothing is exposed to the Internet.
+//! `localhost`, private IP ranges and Tailscale addresses) issues a short-lived TLS 1.3 server
+//! certificate. The iPad trusts the authority once (configuration profile); nothing is exposed to
+//! the Internet.
 
 use crate::paths;
 use crate::platform::dpapi;
@@ -17,6 +18,9 @@ use time::{Duration, OffsetDateTime};
 use zeroize::Zeroizing;
 
 const PURPOSE: &str = "local-authority";
+/// Version 2 also permits Tailscale addresses (100.64.0.0/10). Older authorities are replaced,
+/// so iPads trust the new one once.
+const AUTHORITY_VERSION: u32 = 2;
 
 #[derive(Serialize, Deserialize)]
 struct StoredAuthority {
@@ -30,6 +34,7 @@ pub struct LocalAuthority {
     key: KeyPair,
     pub cert_der: Vec<u8>,
     pub created_at: u64,
+    version: u32,
 }
 
 impl LocalAuthority {
@@ -37,8 +42,12 @@ impl LocalAuthority {
         let path = paths::ensure_data_dir()?.join("authority.bin");
         if let Ok(wrapped) = std::fs::read(&path) {
             match Self::decode(&wrapped) {
-                Ok(authority) if !authority.expires_soon() => return Ok(authority),
-                Ok(_) => tracing::info!("local authority close to expiry; renewing"),
+                Ok(authority)
+                    if !authority.expires_soon() && authority.version >= AUTHORITY_VERSION =>
+                {
+                    return Ok(authority)
+                }
+                Ok(_) => tracing::info!("local authority outdated or close to expiry; renewing"),
                 Err(error) => {
                     tracing::error!(%error, "local authority unreadable; creating a new one")
                 }
@@ -46,7 +55,7 @@ impl LocalAuthority {
         }
         let authority = Self::generate(computer_name)?;
         let stored = StoredAuthority {
-            version: 1,
+            version: AUTHORITY_VERSION,
             key: b64u(&authority.key.serialize_der()),
             cert: b64u(&authority.cert_der),
             created_at: authority.created_at,
@@ -67,6 +76,7 @@ impl LocalAuthority {
             key,
             cert_der,
             created_at: stored.created_at,
+            version: stored.version,
         })
     }
 
@@ -103,6 +113,7 @@ impl LocalAuthority {
                 GeneralSubtree::IpAddress(CidrSubnet::V4([192, 168, 0, 0], [255, 255, 0, 0])),
                 GeneralSubtree::IpAddress(CidrSubnet::V4([169, 254, 0, 0], [255, 255, 0, 0])),
                 GeneralSubtree::IpAddress(CidrSubnet::V4([127, 0, 0, 0], [255, 0, 0, 0])),
+                GeneralSubtree::IpAddress(CidrSubnet::V4([100, 64, 0, 0], [255, 192, 0, 0])),
             ],
             excluded_subtrees: vec![],
         });
@@ -111,6 +122,7 @@ impl LocalAuthority {
             key,
             cert_der: cert.der().to_vec(),
             created_at: now_ms(),
+            version: AUTHORITY_VERSION,
         })
     }
 
@@ -122,7 +134,7 @@ impl LocalAuthority {
             .join(":")
     }
 
-    /// Issues a 30-day server certificate for the given hostnames and LAN addresses.
+    /// Issues a 30-day server certificate for the given hostnames and LAN/Tailscale addresses.
     pub fn issue_server_certificate(
         &self,
         hostnames: &[String],
@@ -178,7 +190,7 @@ impl LocalAuthority {
     <dict>
       <key>PayloadCertificateFileName</key><string>vision-pro-local-authority.cer</string>
       <key>PayloadContent</key><data>{data}</data>
-      <key>PayloadDescription</key><string>Lets this iPad verify the secure connection to {name}. Valid only for local network addresses.</string>
+      <key>PayloadDescription</key><string>Lets this iPad verify the secure connection to {name}. Valid only for local network and Tailscale addresses.</string>
       <key>PayloadDisplayName</key><string>Vision-Pro Local Authority</string>
       <key>PayloadIdentifier</key><string>app.vision-pro.local-authority.{payload_uuid}</string>
       <key>PayloadType</key><string>com.apple.security.root</string>
