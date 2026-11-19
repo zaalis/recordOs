@@ -15,6 +15,9 @@ coverage/
 # Built installers: regenerate with `npm run package:installer`
 installer/*.exe
 installer/**/*.exe
+installer/Record-OS-*/SHA256SUMS.txt
+installer/Record-OS-*/payload.sha256
+installer/Record-OS-*/payload-verification.txt
 
 # Local performance recordings
 diagnostics/

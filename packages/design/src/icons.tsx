@@ -60,10 +60,12 @@ export type IconName =
   | 'camera'
   | 'hand'
   | 'arrow-up'
+  | 'update'
   | 'cable'
   | 'dots';
 
 const paths: Record<IconName, ReactElement> = {
+  update: <path d="M12 3v12m-4-4 4 4 4-4M4 16v4h16v-4" />,
   home: <path d="M4 10.5 12 4l8 6.5V19a1 1 0 0 1-1 1h-4.5v-5.5h-5V20H5a1 1 0 0 1-1-1z" />,
   display: (
     <>

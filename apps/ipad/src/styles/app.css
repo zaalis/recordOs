@@ -1122,3 +1122,6 @@ textarea {
 .style-control { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 48px; padding: 8px 16px; }
 .style-control input[type=color] { width: 48px; height: 44px; border: 0; background: transparent; }
 .field-stack input[type=range] { width: 100%; min-height: 44px; accent-color: var(--vp-text); }
+
+.creative-tap-setting { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; padding: 8px 14px; }
+.creative-tap-setting select { min-height: 44px; max-width: 100%; padding: 0 12px; font: inherit; color: var(--vp-text); background: var(--vp-surface-3); border: 1px solid var(--vp-separator); border-radius: var(--vp-radius-sm); }

@@ -1,0 +1,63 @@
+name: Préparer une version Windows signée
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: record-os-windows-release
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    if: github.ref == 'refs/heads/main'
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - name: Construire et signer la mise à jour
+        shell: powershell
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.RECORD_OS_UPDATER_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.RECORD_OS_UPDATER_PASSWORD }}
+        run: |
+          if (!$env:TAURI_SIGNING_PRIVATE_KEY -or !$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD) {
+            throw 'Les secrets de signature Record OS sont manquants.'
+          }
+          .\scripts\build-record-os-installer.ps1 -SignUpdates
+      - name: Préparer le brouillon GitHub Releases
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $config = Get-Content apps/desktop/src-tauri/tauri.conf.json -Raw | ConvertFrom-Json
+          $version = $config.version
+          $tag = "v$version"
+          $payload = "apps/desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/Record OS_${version}_x64-setup.exe"
+          $asset = 'Record-OS-update-x64.exe'
+          $stage = Join-Path $env:RUNNER_TEMP 'record-os-release'
+          New-Item -ItemType Directory -Path $stage | Out-Null
+          Copy-Item -LiteralPath $payload -Destination (Join-Path $stage $asset)
+          $manifest = @{
+            version = $version
+            pub_date = [DateTimeOffset]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')
+            platforms = @{
+              'windows-x86_64' = @{
+                signature = (Get-Content -LiteralPath "$payload.sig" -Raw).Trim()
+                url = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/releases/download/$tag/$asset"
+              }
+            }
+          }
+          $manifest | ConvertTo-Json -Depth 4 | Set-Content (Join-Path $stage 'latest.json') -Encoding utf8NoBOM
+          $installer = "installer/Record-OS-$version/Record-OS_${version}_x64-setup.exe"
+          gh release create $tag --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --draft --title "Record OS $version" --generate-notes $installer (Join-Path $stage $asset) (Join-Path $stage 'latest.json')
+          if ($LASTEXITCODE) { throw 'Le brouillon de version GitHub n’a pas été créé.' }

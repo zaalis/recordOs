@@ -8,10 +8,10 @@
  *               three-finger swipe = configurable action.
  * Pencil:       Apple Pencil is a Windows Ink pen (pressure, tilt, hover); fingers navigate.
  *
- * Every event is sent the moment it happens.
+ * Creative touch taps can wait briefly to distinguish a single tap from a double tap.
  */
 import { InputEncoder, MouseButton, PenButtons, PenPhase, VK, type MouseButtonId } from '@vision-pro/protocol';
-import type { ControlMode, Preferences } from '../lib/storage.ts';
+import type { ControlMode, CreativeTapAction, Preferences } from '../lib/storage.ts';
 
 export interface InputSink {
   reliable(buffer: ArrayBuffer): void;
@@ -25,6 +25,7 @@ export interface InputCallbacks {
   onRedo(): void;
   onActivity(): void;
   modifiersForClick(): void;
+  onCreativeTap?(action: Exclude<CreativeTapAction, 'none'>): void;
   onInputSource(source: InputSource): void;
 }
 
@@ -61,6 +62,8 @@ type Gesture =
 const SLOP = 10;
 const LONG_PRESS_MS = 480;
 const TAP_MS = 280;
+const CREATIVE_DOUBLE_TAP_MS = 270;
+const CREATIVE_DOUBLE_TAP_SLOP = 30;
 
 type Settings = Pick<
   Preferences,
@@ -73,6 +76,10 @@ type Settings = Pick<
   | 'pencilHover'
   | 'pencilPressureCurve'
   | 'pencilFingers'
+  | 'pencilSensitivity'
+  | 'creativeTouch'
+  | 'creativeTap'
+  | 'creativeDoubleTap'
   | 'twoFingerTapUndo'
 >;
 
@@ -81,6 +88,7 @@ export class InputController {
   private pointers = new Map<number, TrackedPointer>();
   private gesture: Gesture = 'none';
   private longPressTimer = 0;
+  private pendingCreativeTap: { x: number; y: number; timer: number } | null = null;
   private lastTap = { t: 0, x: 0, y: 0 };
   private maxPointers = 0;
   private gestureStart = 0;
@@ -111,6 +119,7 @@ export class InputController {
   ) {}
 
   setSettings(settings: Settings): void {
+    if (settings.creativeTouch !== this.settings.creativeTouch || settings.creativeTap !== this.settings.creativeTap || settings.creativeDoubleTap !== this.settings.creativeDoubleTap) this.cancelCreativeTap();
     this.settings = settings;
   }
 
@@ -155,6 +164,8 @@ export class InputController {
   }
 
   releaseAll(): void {
+    this.cancelCreativeTap();
+    this.lastTap = { t: 0, x: 0, y: 0 };
     window.clearTimeout(this.longPressTimer);
     cancelAnimationFrame(this.momentumFrame);
     if (this.gesture === 'drag' || this.gesture === 'track-drag') this.sink.reliable(this.encoder.button(MouseButton.Left, false, null, null));
@@ -248,6 +259,7 @@ export class InputController {
     } catch {
       /* pointer already gone */
     }
+    if (e.pointerType === 'pen' || e.pointerType === 'mouse') this.cancelCreativeTap();
     if (e.pointerType === 'pen') { this.callbacks.onInputSource('pencil'); return this.penDown(e); }
     if (e.pointerType === 'mouse') { this.callbacks.onInputSource('pointer'); return this.mouseButton(e, true); }
     this.callbacks.onInputSource('fingers');
@@ -284,6 +296,7 @@ export class InputController {
         this.gesture = 'rest';
       }
     } else if (count === 2) {
+      this.cancelCreativeTap();
       window.clearTimeout(this.longPressTimer);
       if (this.gesture === 'drag' || this.gesture === 'track-drag') {
         const p = [...this.pointers.values()][0]!;
@@ -308,6 +321,7 @@ export class InputController {
 
   private onMove(e: PointerEvent): void {
     if (!this.enabled) return;
+    if (e.pointerType === 'pen' || e.pointerType === 'mouse') this.cancelCreativeTap();
     if (e.pointerType === 'pen') { this.callbacks.onInputSource('pencil'); return this.penMove(e); }
     if (e.pointerType === 'mouse') { this.callbacks.onInputSource('pointer'); return this.mouseMove(e); }
     const p = this.pointers.get(e.pointerId);
@@ -491,7 +505,11 @@ export class InputController {
       switch (this.gesture) {
         case 'tap':
           window.clearTimeout(this.longPressTimer);
-          if (this.maxPointers === 1 && touchMode === 'direct') this.click(p.x, p.y);
+          if (this.maxPointers === 1 && touchMode === 'direct') {
+            if (this.mode === 'direct' && this.settings.creativeTouch && this.callbacks.onCreativeTap) {
+              if (elapsed < TAP_MS && Math.hypot(p.x - p.x0, p.y - p.y0) < SLOP) this.creativeTap(p.x, p.y);
+            } else this.click(p.x, p.y);
+          }
           break;
         case 'drag': {
           const n = this.normalize(p.x, p.y);
@@ -539,6 +557,7 @@ export class InputController {
   }
 
   private cancelTouchGesture(): void {
+    this.cancelCreativeTap();
     window.clearTimeout(this.longPressTimer);
     cancelAnimationFrame(this.momentumFrame);
     if (this.gesture === 'drag' || this.gesture === 'track-drag') {
@@ -564,6 +583,42 @@ export class InputController {
     }
   }
 
+  private cancelCreativeTap(): void {
+    if (this.pendingCreativeTap) window.clearTimeout(this.pendingCreativeTap.timer);
+    this.pendingCreativeTap = null;
+  }
+
+  private creativeTap(x: number, y: number): void {
+    if (!this.normalize(x, y).inside) {
+      this.cancelCreativeTap();
+      return;
+    }
+    const runSingle = (x: number, y: number) => {
+      if (!this.enabled || this.mode !== 'direct') return;
+      const action = this.settings.creativeTap;
+      if (action === 'click') this.click(x, y);
+      else if (action !== 'none') this.callbacks.onCreativeTap?.(action);
+    };
+    const doubleAction = this.settings.creativeDoubleTap;
+    if (doubleAction === 'none') {
+      runSingle(x, y);
+      return;
+    }
+    const pending = this.pendingCreativeTap;
+    this.cancelCreativeTap();
+    if (pending && Math.hypot(x - pending.x, y - pending.y) <= CREATIVE_DOUBLE_TAP_SLOP) {
+      this.callbacks.onCreativeTap?.(doubleAction);
+      return;
+    }
+    if (pending) runSingle(pending.x, pending.y);
+    const timer = window.setTimeout(() => {
+      this.pendingCreativeTap = null;
+      // A second contact may be the start of a stroke or multi-finger gesture.
+      if (this.pointers.size === 0) runSingle(x, y);
+    }, CREATIVE_DOUBLE_TAP_MS);
+    this.pendingCreativeTap = { x, y, timer };
+  }
+
   private click(clientX: number, clientY: number): void {
     const n = this.normalize(clientX, clientY);
     if (!n.inside) return;
@@ -576,6 +631,7 @@ export class InputController {
   private longPress(pointerId: number): void {
     const p = this.pointers.get(pointerId);
     if (!p || this.gesture !== 'tap' || this.pointers.size !== 1) return;
+    this.cancelCreativeTap();
     this.gesture = 'long-press';
     const n = this.normalize(p.x, p.y);
     this.callbacks.modifiersForClick();
@@ -623,7 +679,7 @@ export class InputController {
   // ---------------------------------------------------------------------------
 
   private pressure(raw: number): number {
-    const p = Math.min(1, Math.max(0, raw));
+    const p = Math.min(1, Math.max(0, (Number.isFinite(raw) ? raw : 0) * this.settings.pencilSensitivity));
     switch (this.settings.pencilPressureCurve) {
       case 'soft':
         return Math.pow(p, 0.6);
@@ -678,7 +734,7 @@ export class InputController {
       return;
     }
     const { tx, ty, twist } = this.tilt(e);
-    this.penPhase(PenPhase.Down, n.x, n.y, this.pressure(e.pressure || 0.5), tx, ty, twist);
+    this.penPhase(PenPhase.Down, n.x, n.y, this.pressure(e.pressure), tx, ty, twist);
     this.penInContact = true;
     this.penHovering = true;
   }

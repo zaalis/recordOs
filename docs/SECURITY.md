@@ -39,11 +39,11 @@ Agent state is stored below `%APPDATA%\Vision-Pro`. Do not publish this director
 - Do not use `VP_INSECURE_DEV=1` outside loopback testing.
 - Restrict the Windows firewall rule to the private network profile and configured agent port. A USB cable network is made private (with consent) rather than opening the public profile.
 - The web app's Content Security Policy allows `wss://*:<agent port>` so the installed app (whose origin is the `.local` name) can reach the PC through a cable address; scripts remain restricted to `'self'`.
-- Protect software updates with code signing and a signed update manifest before distributing broadly.
+- The Windows updater verifies the signature of the installer downloaded from GitHub Releases, using a public key pinned in the app. Restrict access to the release workflow and signing secrets.
 
 ## Known capability gates
 
-WebAuthn/passkeys, optional 2FA, automated signed updates and third-party penetration testing are not complete in this repository. The relay requires an operator-provided public host and certificate. The UI and configuration do not claim those capabilities are active. They require deployment-specific origins, credentials, signing infrastructure and independent security validation.
+WebAuthn/passkeys, optional 2FA and third-party penetration testing are not complete in this repository. The relay requires an operator-provided public host and certificate. The UI and configuration do not claim those capabilities are active. They require deployment-specific origins, credentials, signing infrastructure and independent security validation.
 
 Security issues should be handled privately; do not include live credentials, private keys or personal device identifiers in a public report.
 

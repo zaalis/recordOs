@@ -14,7 +14,7 @@ import { Badge, Button, Group, Icon, IconButton, Row, Slider, Switch, formatMs, 
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { connection, exportConnectionDiagnostics } from '../lib/connection.ts';
 import { allProfiles, setScreen, updatePrefs, useApp } from '../lib/store.ts';
-import type { ControlMode, Preferences } from '../lib/storage.ts';
+import type { ControlMode, CreativeTapAction, Preferences } from '../lib/storage.ts';
 import { isFullscreenActive, toggleFullscreen } from '../lib/platform.ts';
 import { InputController, type InputSource, type ThreeDNavigation } from './input-controller.ts';
 
@@ -59,6 +59,7 @@ export function Session() {
   const activityTimer = useRef(0);
   const toast = useToast();
   const previousLink = useRef(snapshot.link);
+  const creativeTool = useRef<'brush' | 'eraser'>('brush');
 
   // Confirm the move when a plugged-in cable takes over the session (and when it is unplugged).
   useEffect(() => {
@@ -75,6 +76,11 @@ export function Session() {
     return profiles.find((p) => p.id === prefs.activeProfileId) ?? profiles[0]!;
   }, [prefs.activeProfileId, prefs.autoProfiles, snapshot.activeApp]);
   const threeDNavigation: ThreeDNavigation = activeProfile.id === 'blender' || activeProfile.id === 'maya' || activeProfile.id === 'zbrush' || activeProfile.id === 'houdini' ? activeProfile.id : 'none';
+  const brushSection = activeProfile.sections.find(section => section.id === 'brush');
+  const brushTools = brushSection?.controls.filter((control): control is KeyControl =>
+    control.type === 'key' && (control.id === 'brush' || control.id === 'eraser'));
+  const creativeAvailable = Boolean(snapshot.activeApp?.profile === 'photoshop' && brushTools?.length === 2);
+  useEffect(() => { creativeTool.current = 'brush'; }, [snapshot.activeApp?.exe]);
   const display = snapshot.displays.find((d) => d.id === snapshot.activeDisplayId) ?? snapshot.displays[0];
 
   const activity = useCallback(() => {
@@ -125,8 +131,25 @@ export function Session() {
     return () => observer.disconnect();
   }, [contentRect]);
 
-  const inputContext = useRef({ contentRect, activity, sendCombo, prefs });
-  inputContext.current = { contentRect, activity, sendCombo, prefs };
+  function creativeTap(action: Exclude<CreativeTapAction, 'none'>) {
+    if (!creativeAvailable) return;
+    if (action === 'palette') {
+      setInterfaceHidden(false);
+      setIdle(false);
+      window.clearTimeout(activityTimer.current);
+      setPanel('shortcuts');
+      return;
+    }
+    const next = creativeTool.current === 'brush' ? 'eraser' : 'brush';
+    const shortcut = brushTools?.find(tool => tool.id === next);
+    if (!shortcut) return;
+    sendCombo(shortcut.keys);
+    creativeTool.current = next;
+    toast(next === 'eraser' ? 'Gomme sélectionnée' : 'Pinceau sélectionné', { icon: next === 'eraser' ? 'eraser' : 'pencil' });
+  }
+
+  const inputContext = useRef({ contentRect, activity, sendCombo, creativeTap });
+  inputContext.current = { contentRect, activity, sendCombo, creativeTap };
   useEffect(() => {
     const surface = surfaceRef.current;
     if (!surface) return;
@@ -134,7 +157,7 @@ export function Session() {
       surface,
       () => inputContext.current.contentRect(),
       { reliable: (buffer) => connection.sendInput(buffer), realtime: (buffer) => connection.sendRealtime(buffer) },
-      prefs,
+      { ...prefs, creativeTouch: prefs.creativeTouch && creativeAvailable },
       {
         onToggleInterface: () => setInterfaceHidden((hidden) => !hidden),
         onFeedback: (kind, x, y) => {
@@ -147,6 +170,7 @@ export function Session() {
         onActivity: () => inputContext.current.activity(),
         modifiersForClick: () => undefined,
         onInputSource: setInputSource,
+        onCreativeTap: action => inputContext.current.creativeTap(action),
       },
       threeDNavigation,
     );
@@ -162,8 +186,8 @@ export function Session() {
     if (controller.mode !== prefs.controlMode || !snapshot.controlAllowed) controller.releaseAll();
     controller.mode = prefs.controlMode;
     controller.enabled = snapshot.controlAllowed;
-    controller.setSettings(prefs);
-  }, [prefs, snapshot.controlAllowed]);
+    controller.setSettings({ ...prefs, creativeTouch: prefs.creativeTouch && creativeAvailable });
+  }, [prefs, snapshot.controlAllowed, creativeAvailable]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -207,7 +231,6 @@ export function Session() {
 
   const setMode = (mode: ControlMode) => {
     updatePrefs({ controlMode: mode });
-    if (controllerRef.current) controllerRef.current.mode = mode;
   };
 
   const disconnect = () => {
@@ -300,7 +323,7 @@ export function Session() {
           <ToolbarButton icon="home" label="Home" onClick={disconnect} />
           <span className="toolbar-divider" />
           <ToolbarButton icon="displays" label="Displays" active={panel === 'displays'} onClick={() => choosePanel('displays')} />
-          <ToolbarButton icon={prefs.controlMode === 'pencil' ? 'pencil' : prefs.controlMode === 'trackpad' ? 'trackpad' : 'touch'} label="Control" active={panel === 'control'} onClick={() => choosePanel('control')} />
+          <ToolbarButton icon={prefs.controlMode === 'pencil' ? 'pencil' : prefs.controlMode === 'trackpad' ? 'trackpad' : 'touch'} label="Commandes" active={panel === 'control'} onClick={() => choosePanel('control')} />
           <ToolbarButton icon="keyboard" label="Keyboard" active={panel === 'keyboard'} onClick={() => choosePanel('keyboard')} />
           <ToolbarButton icon="command" label="Shortcuts" active={panel === 'shortcuts'} onClick={() => choosePanel('shortcuts')} />
           <ToolbarButton icon="gear" label="Settings" active={panel === 'settings'} onClick={() => choosePanel('settings')} />
@@ -343,7 +366,7 @@ function PanelView({ panel, profile, prefs, state, onClose, onMode, onCombo, onT
   latched: Set<KeyName>;
   setLatched: React.Dispatch<React.SetStateAction<Set<KeyName>>>;
 }) {
-  const titles = { displays: 'Écrans', control: 'Control', keyboard: 'Keyboard', shortcuts: profile.name, settings: 'Session' };
+  const titles = { displays: 'Écrans', control: 'Commandes', keyboard: 'Keyboard', shortcuts: profile.name, settings: 'Session' };
   return (
     <aside className="panel" data-wide={panel === 'shortcuts' ? 'true' : undefined} style={style} aria-label={titles[panel]}>
       <header className="panel-header"><h3>{titles[panel]}</h3><IconButton icon="close" label="Close" size="sm" onClick={onClose} /></header>
@@ -371,7 +394,31 @@ function ControlPanel({ prefs, onMode }: { prefs: Preferences; onMode: (mode: Co
       <Row title="Natural scrolling" accessory={<Switch label="Natural scrolling" checked={prefs.naturalScrolling} onChange={(naturalScrolling) => updatePrefs({ naturalScrolling })} />} />
       <Row title="Tap to click" accessory={<Switch label="Tap to click" checked={prefs.tapToClick} onChange={(tapToClick) => updatePrefs({ tapToClick })} />} />
     </Group>
-    {prefs.controlMode === 'pencil' && <Group title="Apple Pencil"><Row title="Windows Ink" accessory={<Switch label="Windows Ink" checked={prefs.pencilWindowsInk} onChange={(pencilWindowsInk) => updatePrefs({ pencilWindowsInk })} />} /><Row title="Pencil hover" accessory={<Switch label="Pencil hover" checked={prefs.pencilHover} onChange={(pencilHover) => updatePrefs({ pencilHover })} />} /></Group>}
+    <Group title="Apple Pencil et gestes" footer="Les gestes au doigt s’appliquent en mode tactile direct quand Photoshop est au premier plan et que son profil est actif. Le trait au doigt utilise la pression fixe du clic.">
+      <Row title="Gestes créatifs au doigt" subtitle="Utiliser les gestes sans Apple Pencil" accessory={<Switch label="Gestes créatifs au doigt" checked={prefs.creativeTouch} onChange={(creativeTouch) => updatePrefs({ creativeTouch })} />} />
+      {prefs.creativeTouch && <>
+        <label className="creative-tap-setting"><span>Toucher simple</span>
+          <select value={prefs.creativeTap} onChange={event => updatePrefs({ creativeTap: event.currentTarget.value as Preferences['creativeTap'] })}>
+            <option value="palette">Ouvrir la palette</option><option value="click">Clic Windows</option><option value="swap-tool">Pinceau / gomme</option><option value="none">Aucune action</option>
+          </select>
+        </label>
+        <label className="creative-tap-setting"><span>Double tap</span>
+          <select value={prefs.creativeDoubleTap} onChange={event => updatePrefs({ creativeDoubleTap: event.currentTarget.value as CreativeTapAction })}>
+            <option value="swap-tool">Pinceau / gomme</option><option value="palette">Ouvrir la palette</option><option value="none">Aucune action</option>
+          </select>
+        </label>
+      </>}
+      <Row title="Windows Ink" accessory={<Switch label="Windows Ink" checked={prefs.pencilWindowsInk} onChange={(pencilWindowsInk) => updatePrefs({ pencilWindowsInk })} />} />
+      <Row title="Survol du Pencil" accessory={<Switch label="Survol du Pencil" checked={prefs.pencilHover} onChange={(pencilHover) => updatePrefs({ pencilHover })} />} />
+      <div className="field-stack"><span>Sensibilité du Pencil · {Math.round(prefs.pencilSensitivity * 100)} %</span>
+        <Slider label="Sensibilité du Pencil" min={0.5} max={2} step={0.05} value={prefs.pencilSensitivity} onChange={(pencilSensitivity) => updatePrefs({ pencilSensitivity })} />
+      </div>
+      <label className="creative-tap-setting"><span>Courbe de pression</span>
+        <select value={prefs.pencilPressureCurve} onChange={event => updatePrefs({ pencilPressureCurve: event.currentTarget.value as Preferences['pencilPressureCurve'] })}>
+          <option value="soft">Souple</option><option value="linear">Linéaire</option><option value="firm">Ferme</option>
+        </select>
+      </label>
+    </Group>
   </>;
 }
 

@@ -15,8 +15,6 @@ using Microsoft.Win32;
 [assembly: AssemblyTitle("Record OS — Installation")]
 [assembly: AssemblyProduct("Record OS")]
 [assembly: AssemblyCompany("Record OS")]
-[assembly: AssemblyVersion("0.1.4.0")]
-[assembly: AssemblyFileVersion("0.1.4.0")]
 
 internal sealed class Setup {
     Window window;
@@ -25,7 +23,7 @@ internal sealed class Setup {
     string stage = "Welcome";
     bool busy;
     bool captureOnly;
-    const string Version = "0.1.4";
+    static readonly string Version = Assembly.GetExecutingAssembly().GetName().Version.ToString(3);
     T Find<T>(string name) where T : class { return window.FindName(name) as T; }
     static Stream Resource(string name) {
         var stream = Assembly.GetExecutingAssembly().GetManifestResourceStream(name);

@@ -23,6 +23,7 @@ export interface KnownComputer {
 
 export type ControlMode = 'direct' | 'trackpad' | 'pencil';
 export type ThreeFingerAction = 'none' | 'task-view' | 'show-desktop' | 'switch-app' | 'desktops';
+export type CreativeTapAction = 'none' | 'palette' | 'swap-tool';
 export type PencilFingers = 'navigate' | 'ignore' | 'touch';
 
 export interface SurfaceStyle {
@@ -55,6 +56,10 @@ export interface Preferences {
   pencilHover: boolean;
   pencilPressureCurve: 'soft' | 'linear' | 'firm';
   pencilFingers: PencilFingers;
+  pencilSensitivity: number;
+  creativeTouch: boolean;
+  creativeTap: 'click' | CreativeTapAction;
+  creativeDoubleTap: CreativeTapAction;
   twoFingerTapUndo: boolean;
   commandAsCtrl: boolean;
   autoHideToolbar: boolean;
@@ -79,6 +84,10 @@ export const DEFAULT_PREFERENCES: Preferences = {
   pencilHover: true,
   pencilPressureCurve: 'linear',
   pencilFingers: 'navigate',
+  pencilSensitivity: 1.15,
+  creativeTouch: false,
+  creativeTap: 'palette',
+  creativeDoubleTap: 'swap-tool',
   twoFingerTapUndo: true,
   commandAsCtrl: true,
   autoHideToolbar: true,
@@ -160,6 +169,9 @@ export function preferencesFrom(stored: Partial<Preferences> | undefined): Prefe
   return {
     ...DEFAULT_PREFERENCES,
     ...saved,
+    pencilSensitivity: typeof saved.pencilSensitivity === 'number' && Number.isFinite(saved.pencilSensitivity)
+      ? Math.min(2, Math.max(0.5, saved.pencilSensitivity))
+      : DEFAULT_PREFERENCES.pencilSensitivity,
     surfaceStyle: normalizeSurfaceStyle(saved.surfaceStyle),
     toolbar: { ...DEFAULT_PREFERENCES.toolbar, ...saved.toolbar },
     // Session controls always disappear after five seconds. This migration

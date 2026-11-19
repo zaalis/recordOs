@@ -2,6 +2,21 @@
 ; The bootstrapper passes the existing install directory explicitly during upgrades.
 !macro NSIS_HOOK_PREINSTALL
   ; Abort rather than silently terminating an active session, including a portable instance.
+  ; During an in-app update NSIS can start just before the old process exits.
+  ${If} $UpdateMode = 1
+    Push $1
+    StrCpy $1 20
+    ${Do}
+      nsis_tauri_utils::FindProcessCurrentUser "${MAINBINARYNAME}.exe"
+      Pop $0
+      ${If} $0 <> 0
+        ${ExitDo}
+      ${EndIf}
+      Sleep 250
+      IntOp $1 $1 - 1
+    ${LoopWhile} $1 > 0
+    Pop $1
+  ${EndIf}
   nsis_tauri_utils::FindProcessCurrentUser "${MAINBINARYNAME}.exe"
   Pop $0
   ${If} $0 = 0
