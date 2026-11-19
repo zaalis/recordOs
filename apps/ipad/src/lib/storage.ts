@@ -2,7 +2,9 @@
  * Local persistence (IndexedDB). The device private key is a non-extractable CryptoKey: script can
  * use it to sign, but its bytes can never be read or exported — not even by this app.
  */
-import { type AppProfile, type DeviceIdentity, generateDeviceIdentity } from '@vision-pro/protocol';
+import { type AppProfile, type DeviceIdentity, type KeyName, generateDeviceIdentity } from '@vision-pro/protocol';
+
+import { normalizeShortcut } from './shortcuts.ts';
 
 const DB_NAME = 'vision-pro';
 const DB_VERSION = 1;
@@ -23,7 +25,7 @@ export interface KnownComputer {
 
 export type ControlMode = 'direct' | 'trackpad' | 'pencil';
 export type ThreeFingerAction = 'none' | 'task-view' | 'show-desktop' | 'switch-app' | 'desktops';
-export type CreativeTapAction = 'none' | 'palette' | 'swap-tool';
+export type CreativeTapAction = 'none' | 'palette' | 'swap-tool' | 'shortcut';
 export type PencilFingers = 'navigate' | 'ignore' | 'touch';
 
 export interface SurfaceStyle {
@@ -60,6 +62,8 @@ export interface Preferences {
   creativeTouch: boolean;
   creativeTap: 'click' | CreativeTapAction;
   creativeDoubleTap: CreativeTapAction;
+  creativeTapKeys: KeyName[];
+  creativeDoubleTapKeys: KeyName[];
   twoFingerTapUndo: boolean;
   commandAsCtrl: boolean;
   autoHideToolbar: boolean;
@@ -88,6 +92,8 @@ export const DEFAULT_PREFERENCES: Preferences = {
   creativeTouch: false,
   creativeTap: 'palette',
   creativeDoubleTap: 'swap-tool',
+  creativeTapKeys: ['Ctrl', 'Z'],
+  creativeDoubleTapKeys: ['Ctrl', 'Z'],
   twoFingerTapUndo: true,
   commandAsCtrl: true,
   autoHideToolbar: true,
@@ -172,6 +178,8 @@ export function preferencesFrom(stored: Partial<Preferences> | undefined): Prefe
     pencilSensitivity: typeof saved.pencilSensitivity === 'number' && Number.isFinite(saved.pencilSensitivity)
       ? Math.min(2, Math.max(0.5, saved.pencilSensitivity))
       : DEFAULT_PREFERENCES.pencilSensitivity,
+    creativeTapKeys: normalizeShortcut(saved.creativeTapKeys),
+    creativeDoubleTapKeys: normalizeShortcut(saved.creativeDoubleTapKeys),
     surfaceStyle: normalizeSurfaceStyle(saved.surfaceStyle),
     toolbar: { ...DEFAULT_PREFERENCES.toolbar, ...saved.toolbar },
     // Session controls always disappear after five seconds. This migration

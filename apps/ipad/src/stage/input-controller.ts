@@ -10,7 +10,7 @@
  *
  * Creative touch taps can wait briefly to distinguish a single tap from a double tap.
  */
-import { InputEncoder, MouseButton, PenButtons, PenPhase, VK, type MouseButtonId } from '@vision-pro/protocol';
+import { InputEncoder, MouseButton, PenButtons, PenPhase, VK, type KeyName, type MouseButtonId } from '@vision-pro/protocol';
 import type { ControlMode, CreativeTapAction, Preferences } from '../lib/storage.ts';
 
 export interface InputSink {
@@ -25,7 +25,7 @@ export interface InputCallbacks {
   onRedo(): void;
   onActivity(): void;
   modifiersForClick(): void;
-  onCreativeTap?(action: Exclude<CreativeTapAction, 'none'>): void;
+  onCreativeTap?(action: 'palette' | 'swap-tool'): void;
   onInputSource(source: InputSource): void;
 }
 
@@ -45,6 +45,7 @@ interface TrackedPointer {
 type Gesture =
   | 'none'
   | 'tap'
+  | 'creative-tap'
   | 'drag'
   | 'long-press'
   | 'two'
@@ -80,6 +81,8 @@ type Settings = Pick<
   | 'creativeTouch'
   | 'creativeTap'
   | 'creativeDoubleTap'
+  | 'creativeTapKeys'
+  | 'creativeDoubleTapKeys'
   | 'twoFingerTapUndo'
 >;
 
@@ -119,7 +122,8 @@ export class InputController {
   ) {}
 
   setSettings(settings: Settings): void {
-    if (settings.creativeTouch !== this.settings.creativeTouch || settings.creativeTap !== this.settings.creativeTap || settings.creativeDoubleTap !== this.settings.creativeDoubleTap) this.cancelCreativeTap();
+    if (settings.creativeTouch !== this.settings.creativeTouch || settings.creativeTap !== this.settings.creativeTap || settings.creativeDoubleTap !== this.settings.creativeDoubleTap
+      || settings.creativeTapKeys !== this.settings.creativeTapKeys || settings.creativeDoubleTapKeys !== this.settings.creativeDoubleTapKeys) this.cancelCreativeTap();
     this.settings = settings;
   }
 
@@ -293,7 +297,7 @@ export class InputController {
         this.dragArmed = now - this.lastTap.t < 320 && Math.hypot(e.clientX - this.lastTap.x, e.clientY - this.lastTap.y) < 40;
         this.gesture = 'track';
       } else {
-        this.gesture = 'rest';
+        this.gesture = this.usesCreativeTap() ? 'creative-tap' : 'rest';
       }
     } else if (count === 2) {
       this.cancelCreativeTap();
@@ -336,6 +340,7 @@ export class InputController {
     switch (this.gesture) {
       case 'tap':
         if (moved > SLOP) {
+          this.cancelCreativeTap();
           window.clearTimeout(this.longPressTimer);
           this.gesture = 'drag';
           const start = this.normalize(p.x0, p.y0);
@@ -368,6 +373,12 @@ export class InputController {
         this.relativeMove(dx, dy, e.timeStamp);
         return;
       }
+      case 'creative-tap':
+        if (moved > SLOP) {
+          this.gesture = 'rest';
+          this.cancelCreativeTap();
+        }
+        return;
       case 'rest':
         return;
       case 'two':
@@ -505,11 +516,16 @@ export class InputController {
       switch (this.gesture) {
         case 'tap':
           window.clearTimeout(this.longPressTimer);
-          if (this.maxPointers === 1 && touchMode === 'direct') {
-            if (this.mode === 'direct' && this.settings.creativeTouch && this.callbacks.onCreativeTap) {
-              if (elapsed < TAP_MS && Math.hypot(p.x - p.x0, p.y - p.y0) < SLOP) this.creativeTap(p.x, p.y);
-            } else this.click(p.x, p.y);
+          if (this.maxPointers !== 1 || touchMode !== 'direct') break;
+          if (!this.usesCreativeTap()) {
+            this.click(p.x, p.y);
+            break;
           }
+          // Direct touch and the Crayon mode share tap recognition.
+          this.finishCreativeTap(p, elapsed);
+          break;
+        case 'creative-tap':
+          if (this.maxPointers === 1 && this.usesCreativeTap()) this.finishCreativeTap(p, elapsed);
           break;
         case 'drag': {
           const n = this.normalize(p.x, p.y);
@@ -588,17 +604,31 @@ export class InputController {
     this.pendingCreativeTap = null;
   }
 
+  private usesCreativeTap(): boolean {
+    return this.settings.creativeTouch &&
+      (this.mode === 'direct' || this.mode === 'pencil' && this.settings.pencilFingers !== 'ignore');
+  }
+
+  private finishCreativeTap(pointer: TrackedPointer, elapsed: number): void {
+    if (elapsed < TAP_MS && Math.hypot(pointer.x - pointer.x0, pointer.y - pointer.y0) < SLOP) {
+      this.creativeTap(pointer.x, pointer.y);
+    }
+  }
+
+  private runCreativeAction(action: CreativeTapAction | 'click', keys: readonly KeyName[], x: number, y: number): void {
+    if (!this.enabled || !this.usesCreativeTap()) return;
+    if (action === 'click') this.click(x, y);
+    else if (action === 'shortcut') this.sink.reliable(this.encoder.combo(keys.map(key => VK[key])));
+    else if (action !== 'none') this.callbacks.onCreativeTap?.(action);
+  }
+
   private creativeTap(x: number, y: number): void {
     if (!this.normalize(x, y).inside) {
       this.cancelCreativeTap();
       return;
     }
-    const runSingle = (x: number, y: number) => {
-      if (!this.enabled || this.mode !== 'direct') return;
-      const action = this.settings.creativeTap;
-      if (action === 'click') this.click(x, y);
-      else if (action !== 'none') this.callbacks.onCreativeTap?.(action);
-    };
+    const runSingle = (x: number, y: number) =>
+      this.runCreativeAction(this.settings.creativeTap, this.settings.creativeTapKeys, x, y);
     const doubleAction = this.settings.creativeDoubleTap;
     if (doubleAction === 'none') {
       runSingle(x, y);
@@ -607,7 +637,7 @@ export class InputController {
     const pending = this.pendingCreativeTap;
     this.cancelCreativeTap();
     if (pending && Math.hypot(x - pending.x, y - pending.y) <= CREATIVE_DOUBLE_TAP_SLOP) {
-      this.callbacks.onCreativeTap?.(doubleAction);
+      this.runCreativeAction(doubleAction, this.settings.creativeDoubleTapKeys, x, y);
       return;
     }
     if (pending) runSingle(pending.x, pending.y);

@@ -1,6 +1,6 @@
 [package]
 name = "vision-pro"
-version = "0.1.5"
+version = "0.1.6"
 description = "Record OS Windows desktop agent"
 edition = "2021"
 license = "Proprietary"

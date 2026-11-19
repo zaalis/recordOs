@@ -20,6 +20,7 @@ import { InputController, type InputSource, type ThreeDNavigation } from './inpu
 
 import { StyleSettings } from '../screens/StyleSettings.tsx';
 import { PointerTrail } from './PointerTrail.tsx';
+import { TapBindings } from './TapBindings.tsx';
 
 type Panel = 'displays' | 'control' | 'keyboard' | 'shortcuts' | 'settings' | null;
 type Ripple = { id: number; kind: 'tap' | 'right' | 'drag'; x: number; y: number };
@@ -131,8 +132,7 @@ export function Session() {
     return () => observer.disconnect();
   }, [contentRect]);
 
-  function creativeTap(action: Exclude<CreativeTapAction, 'none'>) {
-    if (!creativeAvailable) return;
+  function creativeTap(action: 'palette' | 'swap-tool') {
     if (action === 'palette') {
       setInterfaceHidden(false);
       setIdle(false);
@@ -140,6 +140,7 @@ export function Session() {
       setPanel('shortcuts');
       return;
     }
+    if (!creativeAvailable) return;
     const next = creativeTool.current === 'brush' ? 'eraser' : 'brush';
     const shortcut = brushTools?.find(tool => tool.id === next);
     if (!shortcut) return;
@@ -157,7 +158,7 @@ export function Session() {
       surface,
       () => inputContext.current.contentRect(),
       { reliable: (buffer) => connection.sendInput(buffer), realtime: (buffer) => connection.sendRealtime(buffer) },
-      { ...prefs, creativeTouch: prefs.creativeTouch && creativeAvailable },
+      prefs,
       {
         onToggleInterface: () => setInterfaceHidden((hidden) => !hidden),
         onFeedback: (kind, x, y) => {
@@ -186,12 +187,16 @@ export function Session() {
     if (controller.mode !== prefs.controlMode || !snapshot.controlAllowed) controller.releaseAll();
     controller.mode = prefs.controlMode;
     controller.enabled = snapshot.controlAllowed;
-    controller.setSettings({ ...prefs, creativeTouch: prefs.creativeTouch && creativeAvailable });
+    controller.setSettings({
+      ...prefs,
+      creativeTap: !creativeAvailable && prefs.creativeTap === 'swap-tool' ? 'click' : prefs.creativeTap,
+      creativeDoubleTap: !creativeAvailable && prefs.creativeDoubleTap === 'swap-tool' ? 'none' : prefs.creativeDoubleTap,
+    });
   }, [prefs, snapshot.controlAllowed, creativeAvailable]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) return;
+      if (event.target instanceof Element && event.target.closest('input, textarea, select, .panel')) return;
       const key = DOM_CODE_TO_KEY[event.code];
       if (!key || event.repeat) return;
       event.preventDefault();
@@ -387,27 +392,16 @@ function DisplaysPanel({ state }: { state: ReturnType<typeof connection.getSnaps
 
 function ControlPanel({ prefs, onMode }: { prefs: Preferences; onMode: (mode: ControlMode) => void }) {
   return <>
-    <div className="mode-cards">{([['direct', 'touch', 'Direct Touch'], ['trackpad', 'trackpad', 'Trackpad'], ['pencil', 'pencil', 'Pencil']] as const).map(([mode, icon, label]) => <button key={mode} type="button" className="mode-card" aria-pressed={prefs.controlMode === mode} onClick={() => onMode(mode)}><Icon name={icon} />{label}</button>)}</div>
-    <Group title="Pointer">
-      <div className="field-stack"><span>Tracking speed</span><Slider label="Tracking speed" min={0.4} max={2.4} step={0.1} value={prefs.trackingSpeed} onChange={(trackingSpeed) => updatePrefs({ trackingSpeed })} /></div>
-      <div className="field-stack"><span>Scroll speed</span><Slider label="Scroll speed" min={0.4} max={2.4} step={0.1} value={prefs.scrollSpeed} onChange={(scrollSpeed) => updatePrefs({ scrollSpeed })} /></div>
-      <Row title="Natural scrolling" accessory={<Switch label="Natural scrolling" checked={prefs.naturalScrolling} onChange={(naturalScrolling) => updatePrefs({ naturalScrolling })} />} />
-      <Row title="Tap to click" accessory={<Switch label="Tap to click" checked={prefs.tapToClick} onChange={(tapToClick) => updatePrefs({ tapToClick })} />} />
+    <div className="mode-cards">{([['direct', 'touch', 'Toucher direct'], ['trackpad', 'trackpad', 'Pavé tactile'], ['pencil', 'pencil', 'Crayon']] as const).map(([mode, icon, label]) => <button key={mode} type="button" className="mode-card" aria-pressed={prefs.controlMode === mode} onClick={() => onMode(mode)}><Icon name={icon} />{label}</button>)}</div>
+    <Group title="Pointeur">
+      <div className="field-stack"><span>Vitesse du pointeur</span><Slider label="Vitesse du pointeur" min={0.4} max={2.4} step={0.1} value={prefs.trackingSpeed} onChange={(trackingSpeed) => updatePrefs({ trackingSpeed })} /></div>
+      <div className="field-stack"><span>Vitesse de défilement</span><Slider label="Vitesse de défilement" min={0.4} max={2.4} step={0.1} value={prefs.scrollSpeed} onChange={(scrollSpeed) => updatePrefs({ scrollSpeed })} /></div>
+      <Row title="Défilement naturel" accessory={<Switch label="Défilement naturel" checked={prefs.naturalScrolling} onChange={(naturalScrolling) => updatePrefs({ naturalScrolling })} />} />
+      <Row title="Toucher pour cliquer" accessory={<Switch label="Toucher pour cliquer" checked={prefs.tapToClick} onChange={(tapToClick) => updatePrefs({ tapToClick })} />} />
     </Group>
-    <Group title="Apple Pencil et gestes" footer="Les gestes au doigt s’appliquent en mode tactile direct quand Photoshop est au premier plan et que son profil est actif. Le trait au doigt utilise la pression fixe du clic.">
+    <Group title="Apple Pencil et gestes" footer="Les gestes au doigt fonctionnent en mode Crayon et Toucher direct. Le raccourci personnalisé s’applique à l’application au premier plan sur le PC. Le changement pinceau / gomme utilise le profil Photoshop.">
       <Row title="Gestes créatifs au doigt" subtitle="Utiliser les gestes sans Apple Pencil" accessory={<Switch label="Gestes créatifs au doigt" checked={prefs.creativeTouch} onChange={(creativeTouch) => updatePrefs({ creativeTouch })} />} />
-      {prefs.creativeTouch && <>
-        <label className="creative-tap-setting"><span>Toucher simple</span>
-          <select value={prefs.creativeTap} onChange={event => updatePrefs({ creativeTap: event.currentTarget.value as Preferences['creativeTap'] })}>
-            <option value="palette">Ouvrir la palette</option><option value="click">Clic Windows</option><option value="swap-tool">Pinceau / gomme</option><option value="none">Aucune action</option>
-          </select>
-        </label>
-        <label className="creative-tap-setting"><span>Double tap</span>
-          <select value={prefs.creativeDoubleTap} onChange={event => updatePrefs({ creativeDoubleTap: event.currentTarget.value as CreativeTapAction })}>
-            <option value="swap-tool">Pinceau / gomme</option><option value="palette">Ouvrir la palette</option><option value="none">Aucune action</option>
-          </select>
-        </label>
-      </>}
+      {prefs.creativeTouch && <TapBindings prefs={prefs} />}
       <Row title="Windows Ink" accessory={<Switch label="Windows Ink" checked={prefs.pencilWindowsInk} onChange={(pencilWindowsInk) => updatePrefs({ pencilWindowsInk })} />} />
       <Row title="Survol du Pencil" accessory={<Switch label="Survol du Pencil" checked={prefs.pencilHover} onChange={(pencilHover) => updatePrefs({ pencilHover })} />} />
       <div className="field-stack"><span>Sensibilité du Pencil · {Math.round(prefs.pencilSensitivity * 100)} %</span>

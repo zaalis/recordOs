@@ -32,3 +32,14 @@ test('surface style keeps defaults on upgrade and bounds stored customization',(
  const value=preferencesFrom({surfaceStyle:{trail:true,trailColor:'not-a-color',trailDuration:99999,patternSpacing:-1,pattern:'bad'}}).surfaceStyle;
  assert.equal(value.trail,true);assert.equal(value.trailColor,DEFAULT_PREFERENCES.surfaceStyle.trailColor);assert.equal(value.trailDuration,1500);assert.equal(value.patternSpacing,8);assert.equal(value.pattern,'dots');
 });
+
+test('each gesture keeps its own shortcut and existing settings inherit a usable default', () => {
+  const prefs = preferencesFrom({
+    creativeTap: 'shortcut', creativeDoubleTap: 'shortcut',
+    creativeTapKeys: ['Shift', 'Z', 'Ctrl', 'Ctrl'], creativeDoubleTapKeys: ['Alt', 'F4'],
+  });
+  assert.deepEqual(prefs.creativeTapKeys, ['Ctrl', 'Shift', 'Z']);
+  assert.deepEqual(prefs.creativeDoubleTapKeys, ['Alt', 'F4']);
+  assert.equal(prefs.creativeDoubleTap, 'shortcut');
+  assert.deepEqual(preferencesFrom({ creativeTapKeys: ['not a key'] }).creativeTapKeys, ['Ctrl', 'Z']);
+});

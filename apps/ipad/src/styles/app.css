@@ -1125,3 +1125,13 @@ textarea {
 
 .creative-tap-setting { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; padding: 8px 14px; }
 .creative-tap-setting select { min-height: 44px; max-width: 100%; padding: 0 12px; font: inherit; color: var(--vp-text); background: var(--vp-surface-3); border: 1px solid var(--vp-separator); border-radius: var(--vp-radius-sm); }
+
+.tap-shortcut { display: grid; gap: 10px; min-width: 0; margin: 4px 14px 12px; padding: 10px 12px 12px; border: 1px solid var(--vp-separator); border-radius: var(--vp-radius); }
+.tap-shortcut legend { padding: 0 6px; font-size: 13px; font-weight: 650; }
+.tap-shortcut-capture, .tap-shortcut-key { display: grid; gap: 5px; font-size: 13px; }
+.tap-shortcut-capture input, .tap-shortcut-key select { box-sizing: border-box; width: 100%; min-height: 44px; }
+.tap-shortcut-key select { padding: 0 10px; color: var(--vp-text); background: var(--vp-surface-3); border: 1px solid var(--vp-separator); border-radius: var(--vp-radius-sm); }
+.tap-shortcut-modifiers { display: flex; flex-wrap: wrap; gap: 6px; }
+.tap-shortcut-modifiers button { padding-inline: 10px; }
+.tap-shortcut-modifiers button[aria-pressed="true"] { color: var(--vp-text-inverse); background: var(--vp-primary); }
+.tap-shortcut small { color: var(--vp-text-2); }

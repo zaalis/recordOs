@@ -89,3 +89,57 @@ test('stylus pressure keeps a light initial contact and respects sensitivity', (
   assert.equal(pressure[2], 1);
   detach();
 });
+
+test('a personalized double tap sends one Ctrl+Z in Crayon mode', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { emit, events, actions, detach } = setup({
+    creativeTouch: true,
+    creativeTap: 'palette',
+    creativeDoubleTap: 'shortcut',
+    creativeDoubleTapKeys: ['Ctrl', 'Z'],
+  });
+  touch(emit, 'pointerdown', 1);
+  touch(emit, 'pointerup', 1);
+  t.mock.timers.tick(100);
+  touch(emit, 'pointerdown', 2);
+  touch(emit, 'pointerup', 2);
+  t.mock.timers.tick(300);
+  assert.deepEqual(actions, []);
+  assert.deepEqual(events.map(kind), [9]);
+  const packet = new DataView(events[0]);
+  assert.equal(packet.getUint8(4), 2);
+  assert.equal(packet.getUint16(6, true), 0x11);
+  assert.equal(packet.getUint16(8, true), 0x5a);
+  detach();
+});
+
+test('a personalized single tap sends its own combination after the double tap interval', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { emit, events, detach } = setup({
+    creativeTouch: true,
+    creativeTap: 'shortcut',
+    creativeTapKeys: ['Ctrl', 'Shift', 'Y'],
+    creativeDoubleTap: 'palette',
+  }, 'direct');
+  touch(emit, 'pointerdown', 1);
+  touch(emit, 'pointerup', 1);
+  t.mock.timers.tick(269);
+  assert.equal(events.length, 0);
+  t.mock.timers.tick(1);
+  const packet = new DataView(events[0]);
+  assert.deepEqual(events.map(kind), [9]);
+  assert.equal(packet.getUint8(4), 3);
+  assert.deepEqual([6, 8, 10].map(offset => packet.getUint16(offset, true)), [0x11, 0x10, 0x59]);
+  detach();
+});
+
+test('a crayon-mode finger drag returning to its start is not a tap', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { emit, actions, detach } = setup({ creativeTouch: true });
+  touch(emit, 'pointerdown', 1);
+  touch(emit, 'pointermove', 1, 260);
+  touch(emit, 'pointerup', 1);
+  t.mock.timers.tick(300);
+  assert.deepEqual(actions, []);
+  detach();
+});
